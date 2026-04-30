@@ -14,7 +14,26 @@ use petgraph::{
 
 use crate::disassemble::Instruction;
 
-pub type BlockId = u32;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BlockId(u32);
+
+impl BlockId {
+    pub fn new(id: u32) -> Self {
+        Self(id)
+    }
+}
+
+impl From<BlockId> for u32 {
+    fn from(block_id: BlockId) -> Self {
+        block_id.0
+    }
+}
+
+impl fmt::Display for BlockId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Block{}", self.0)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Block {
@@ -49,7 +68,7 @@ impl Block {
 
 #[derive(Debug, Clone, Default)]
 pub struct BlockStore {
-    next_id: BlockId,
+    next_id: u32,
     blocks: HashMap<BlockId, Block>,
     block_to_node: HashMap<BlockId, Option<NodeIndex>>,
 }
@@ -74,7 +93,7 @@ impl BlockStore {
         instructions: Vec<Instruction>,
         label: Option<String>,
     ) -> BlockId {
-        let id = self.next_id;
+        let id = BlockId::new(self.next_id);
         self.next_id += 1;
         let block = Block::new(id, start, end, instructions, label);
         self.blocks.insert(id, block);
@@ -361,7 +380,7 @@ pub fn dot(graph: &Cfg, block_store: &BlockStore) -> String {
         let block = block_store.get(block_id);
         let mut lines = vec![
             format!(
-                "Block(id: {}, label: {:?}) [{:#x}-{:#x}]",
+                "{}({:?}) [{:#x}-{:#x}]",
                 block.id,
                 block.label.as_deref().unwrap_or(""),
                 block.start,
