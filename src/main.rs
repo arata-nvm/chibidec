@@ -1,5 +1,7 @@
-use anyhow::{Context, Result};
-use chibidec::{binary::Binary, disassemble};
+use std::path::Path;
+
+use anyhow::Result;
+use chibidec::decompile;
 
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
@@ -8,22 +10,6 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let binary_path = &args[1];
-    let binary_data = std::fs::read(binary_path).context("failed to read binary file")?;
-    let binary = Binary::parse(&binary_data).context("failed to parse binary")?;
-
-    println!("{:x?}", binary.sections());
-    println!("{:x?}", binary.symbols());
-
-    let text_section = binary
-        .section_by_name("__text")
-        .context("failed to find __text section")?;
-
-    let text_insns = disassemble::disassemble(&text_section.data, text_section.addr)
-        .context("failed to disassemble __text section")?;
-    for insn in text_insns {
-        println!("{:x?}", insn);
-    }
-
-    Ok(())
+    let binary_path = Path::new(&args[1]);
+    decompile(binary_path)
 }

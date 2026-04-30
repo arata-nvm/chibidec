@@ -1,15 +1,21 @@
+use std::fmt;
+
 use anyhow::{Context, Result, bail};
 use capstone::{
     Capstone,
-    arch::{self, ArchDetail, BuildsCapstone, DetailsArchInsn, arm64::Arm64OperandType},
+    arch::{
+        self, ArchDetail, BuildsCapstone, DetailsArchInsn,
+        arm64::{Arm64Insn, Arm64OperandType},
+    },
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Instruction {
     pub cs_id: u32,
     pub addr: u64,
     pub len: usize,
     pub mnemonic: String,
+    pub op_str: String,
     pub operands: Option<Vec<String>>,
     pub imm: Option<u64>,
 }
@@ -39,6 +45,7 @@ impl Instruction {
             addr: insn.address(),
             len: insn.len(),
             mnemonic: insn.mnemonic().unwrap_or("???").to_string(),
+            op_str: insn.op_str().unwrap_or("").to_string(),
             operands: if !operands.is_empty() {
                 Some(operands)
             } else {
@@ -46,6 +53,36 @@ impl Instruction {
             },
             imm,
         })
+    }
+
+    pub fn is_conditional_jump(&self) -> bool {
+        matches!(Arm64Insn::from(self.cs_id), Arm64Insn::ARM64_INS_CBNZ)
+    }
+
+    pub fn is_unconditional_jump(&self) -> bool {
+        matches!(Arm64Insn::from(self.cs_id), Arm64Insn::ARM64_INS_B)
+    }
+
+    pub fn is_jump(&self) -> bool {
+        self.is_conditional_jump() || self.is_unconditional_jump()
+    }
+
+    pub fn is_call(&self) -> bool {
+        matches!(Arm64Insn::from(self.cs_id), Arm64Insn::ARM64_INS_BL)
+    }
+
+    pub fn is_ret(&self) -> bool {
+        matches!(Arm64Insn::from(self.cs_id), Arm64Insn::ARM64_INS_RET)
+    }
+
+    pub fn is_terminator(&self) -> bool {
+        self.is_jump() || self.is_ret()
+    }
+}
+
+impl fmt::Display for Instruction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:#x}: {} {}", self.addr, self.mnemonic, self.op_str)
     }
 }
 
