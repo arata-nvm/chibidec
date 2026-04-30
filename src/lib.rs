@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use crate::{
     binary::{Binary, Symbol},
     cfg::{
-        BlockId, BlockStore, construct_blocks, construct_graph, dot, extract_main,
-        find_block_start_addrs,
+        BlockId, BlockStore, add_virtual_exit, construct_blocks, construct_graph, dot,
+        extract_main, find_block_start_addrs,
     },
 };
 
@@ -38,6 +38,8 @@ pub fn decompile(binary_path: &Path) -> Result<()> {
     let graph =
         construct_graph(&mut block_store, &addr_to_insn).context("failed to construct graph")?;
     let main_graph = extract_main(&graph, &block_store).context("failed to extract main graph")?;
+    let (main_graph, _vexit_node) = add_virtual_exit(main_graph, &mut block_store)
+        .context("failed to add virtual exit node")?;
 
     println!("{}", dot(&main_graph, &block_store));
 

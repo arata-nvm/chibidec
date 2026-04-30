@@ -5,6 +5,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use petgraph::{
+    Direction,
     dot::{Config, Dot},
     graph::NodeIndex,
     prelude::StableGraph,
@@ -407,4 +408,15 @@ fn escape_dot_label(label: String) -> String {
         .replace('"', r#"\""#)
         .replace('\n', r"\l")
         + r"\l"
+}
+
+pub fn add_virtual_exit(mut graph: Cfg, block_store: &mut BlockStore) -> Result<(Cfg, NodeIndex)> {
+    let exit_nodes: Vec<_> = graph.externals(Direction::Outgoing).collect();
+    assert!(!exit_nodes.is_empty());
+    let vexit_block = block_store.new_block(0, 0, vec![], Some("vexit".into()));
+    let vexit_node = block_store.add_block_to_graph(&mut graph, vexit_block);
+    for exit_node in exit_nodes {
+        graph.add_edge(exit_node, vexit_node, EdgeLabel::Unconditional);
+    }
+    Ok((graph, vexit_node))
 }
