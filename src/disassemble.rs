@@ -2,16 +2,17 @@ use std::fmt;
 
 use anyhow::{Context, Result, bail};
 use capstone::{
-    Capstone,
+    Capstone, InsnId,
     arch::{
         self, ArchDetail, BuildsCapstone, DetailsArchInsn,
-        arm64::{Arm64Insn, Arm64OperandType},
+        arm64::{Arm64CC, Arm64Insn, Arm64OperandType},
     },
 };
 
 #[derive(Debug, Clone)]
 pub struct Instruction {
-    pub cs_id: u32,
+    pub cs_id: InsnId,
+    pub cs_cc: Arm64CC,
     pub addr: u64,
     pub len: usize,
     pub mnemonic: String,
@@ -41,7 +42,8 @@ impl Instruction {
         });
 
         Ok(Self {
-            cs_id: insn.id().0,
+            cs_id: insn.id(),
+            cs_cc: detail.cc(),
             addr: insn.address(),
             len: insn.len(),
             mnemonic: insn.mnemonic().unwrap_or("???").to_string(),
@@ -55,12 +57,19 @@ impl Instruction {
         })
     }
 
+    fn insn_id(&self) -> Arm64Insn {
+        Arm64Insn::from(self.cs_id.0)
+    }
+
     pub fn is_conditional_jump(&self) -> bool {
-        matches!(Arm64Insn::from(self.cs_id), Arm64Insn::ARM64_INS_CBNZ)
+        matches!(self.insn_id(), Arm64Insn::ARM64_INS_CBNZ)
+            || (matches!(self.insn_id(), Arm64Insn::ARM64_INS_B)
+                && matches!(self.cs_cc, Arm64CC::ARM64_CC_GE))
     }
 
     pub fn is_unconditional_jump(&self) -> bool {
-        matches!(Arm64Insn::from(self.cs_id), Arm64Insn::ARM64_INS_B)
+        matches!(self.insn_id(), Arm64Insn::ARM64_INS_B)
+            && matches!(self.cs_cc, Arm64CC::ARM64_CC_INVALID)
     }
 
     pub fn is_jump(&self) -> bool {
@@ -68,11 +77,11 @@ impl Instruction {
     }
 
     pub fn is_call(&self) -> bool {
-        matches!(Arm64Insn::from(self.cs_id), Arm64Insn::ARM64_INS_BL)
+        matches!(self.insn_id(), Arm64Insn::ARM64_INS_BL)
     }
 
     pub fn is_ret(&self) -> bool {
-        matches!(Arm64Insn::from(self.cs_id), Arm64Insn::ARM64_INS_RET)
+        matches!(self.insn_id(), Arm64Insn::ARM64_INS_RET)
     }
 
     pub fn is_terminator(&self) -> bool {

@@ -1,12 +1,16 @@
 use std::{collections::HashMap, path::Path};
 
 use anyhow::{Context, Result};
+use petgraph::{
+    algo::dominators::{self},
+    visit::DfsPostOrder,
+};
 
 use crate::{
     binary::{Binary, Symbol},
     cfg::{
         BlockId, BlockStore, add_virtual_exit, construct_blocks, construct_graph, dot,
-        extract_main, find_block_start_addrs,
+        extract_main, find_block_start_addrs, find_entry_node, has_backedge,
     },
 };
 
@@ -38,10 +42,19 @@ pub fn decompile(binary_path: &Path) -> Result<()> {
     let graph =
         construct_graph(&mut block_store, &addr_to_insn).context("failed to construct graph")?;
     let main_graph = extract_main(&graph, &block_store).context("failed to extract main graph")?;
-    let (main_graph, _vexit_node) = add_virtual_exit(main_graph, &mut block_store)
+    let (main_graph, vexit) = add_virtual_exit(main_graph, &mut block_store)
         .context("failed to add virtual exit node")?;
 
     println!("{}", dot(&main_graph, &block_store));
+
+    let entry = find_entry_node(&main_graph).context("failed to find entry node")?;
+    let mut order = DfsPostOrder::new(&main_graph, entry);
+    let dom = dominators::simple_fast(&main_graph, entry);
+    while let Some(head) = order.next(&main_graph) {
+        if has_backedge(&main_graph, head, vexit, &dom) {
+            eprintln!("cycle discovered: {}", head.index());
+        }
+    }
 
     Ok(())
 }

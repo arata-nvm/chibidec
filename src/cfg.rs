@@ -6,11 +6,12 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use petgraph::{
     Direction,
+    algo::dominators::Dominators,
     dot::{Config, Dot},
     graph::NodeIndex,
     prelude::StableGraph,
     stable_graph::EdgeReference,
-    visit::Dfs,
+    visit::{Dfs, EdgeRef},
 };
 
 use crate::disassemble::Instruction;
@@ -64,6 +65,14 @@ impl Block {
 
     pub fn terminator(&self) -> Option<&Instruction> {
         self.instructions.last()
+    }
+
+    fn insn_from_end(&self, n: usize) -> Option<&Instruction> {
+        if self.instructions.len() < n {
+            None
+        } else {
+            self.instructions.get(self.instructions.len() - n)
+        }
     }
 }
 
@@ -175,9 +184,19 @@ impl Condition {
             return None;
         }
 
-        assert!(term_insn.mnemonic == "cbnz");
         let reg = term_insn.operands.as_ref()?.first()?;
-        Some(Self::new("!=", reg, "0"))
+        match term_insn.mnemonic.as_str() {
+            "cbnz" => Some(Self::new("!=", reg, "0")),
+            "b.ge" => {
+                let prev_insn = block.insn_from_end(2)?;
+                if prev_insn.mnemonic != "subs" {
+                    return None;
+                }
+                let rhs = prev_insn.imm?.to_string();
+                Some(Self::new(">", reg, rhs))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -377,12 +396,13 @@ pub fn dot(graph: &Cfg, block_store: &BlockStore) -> String {
         Some(color) => format!(r#"color = "{color}""#),
         None => String::new(),
     };
-    let get_node_attributes = |_, (_, &block_id)| {
+    let get_node_attributes = |_, (node_index, &block_id): (NodeIndex, _)| {
         let block = block_store.get(block_id);
         let mut lines = vec![
             format!(
-                "{}({:?}) [{:#x}-{:#x}]",
+                "{}({}, {:?}) [{:#x}-{:#x}]",
                 block.id,
+                node_index.index(),
                 block.label.as_deref().unwrap_or(""),
                 block.start,
                 block.end
@@ -419,4 +439,31 @@ pub fn add_virtual_exit(mut graph: Cfg, block_store: &mut BlockStore) -> Result<
         graph.add_edge(exit_node, vexit_node, EdgeLabel::Unconditional);
     }
     Ok((graph, vexit_node))
+}
+
+pub fn find_entry_node(graph: &Cfg) -> Option<NodeIndex> {
+    graph.externals(Direction::Incoming).next()
+}
+
+pub fn has_backedge(
+    graph: &Cfg,
+    target: NodeIndex,
+    vexit: NodeIndex,
+    dominators: &Dominators<NodeIndex>,
+) -> bool {
+    if target == vexit {
+        return false;
+    }
+    graph
+        .edges_directed(target, Direction::Outgoing)
+        .any(|edge| {
+            let head = edge.target();
+            dominates(head, target, dominators)
+        })
+}
+
+fn dominates(dominator: NodeIndex, target: NodeIndex, dominators: &Dominators<NodeIndex>) -> bool {
+    dominators
+        .dominators(target)
+        .is_some_and(|mut it| it.any(|d| d == dominator))
 }
