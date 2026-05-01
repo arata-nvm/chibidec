@@ -12,11 +12,13 @@ use crate::{
         BlockId, BlockStore, add_virtual_exit, construct_blocks, construct_graph, dot,
         extract_main, find_block_start_addrs, find_entry_node, has_backedge,
     },
+    region::{Region, RegionArena, match_acyclic},
 };
 
 pub mod binary;
 pub mod cfg;
 pub mod disassemble;
+pub mod region;
 
 pub fn decompile(binary_path: &Path) -> Result<()> {
     let binary_data = std::fs::read(binary_path).context("failed to read binary file")?;
@@ -42,17 +44,53 @@ pub fn decompile(binary_path: &Path) -> Result<()> {
     let graph =
         construct_graph(&mut block_store, &addr_to_insn).context("failed to construct graph")?;
     let main_graph = extract_main(&graph, &block_store).context("failed to extract main graph")?;
-    let (main_graph, vexit) = add_virtual_exit(main_graph, &mut block_store)
+    let (mut main_graph, vexit) = add_virtual_exit(main_graph, &mut block_store)
         .context("failed to add virtual exit node")?;
 
     println!("{}", dot(&main_graph, &block_store));
 
-    let entry = find_entry_node(&main_graph).context("failed to find entry node")?;
-    let mut order = DfsPostOrder::new(&main_graph, entry);
-    let dom = dominators::simple_fast(&main_graph, entry);
-    while let Some(head) = order.next(&main_graph) {
-        if has_backedge(&main_graph, head, vexit, &dom) {
-            eprintln!("cycle discovered: {}", head.index());
+    let mut region_arena = RegionArena::new();
+    let mut block_to_region = HashMap::new();
+    for n in main_graph.node_indices() {
+        let block_id = main_graph.node_weight(n).unwrap();
+        let region_id = region_arena.alloc(Region::Leaf(*block_id));
+        block_to_region.insert(*block_id, region_id);
+    }
+
+    let mut seq_count = 0;
+    loop {
+        if main_graph.node_count() <= 1 {
+            break;
+        }
+
+        let mut progress = false;
+        let entry = find_entry_node(&main_graph).context("failed to find entry node")?;
+
+        let mut order = DfsPostOrder::new(&main_graph, entry);
+        let dom = dominators::simple_fast(&main_graph, entry);
+
+        while let Some(head) = order.next(&main_graph) {
+            if has_backedge(&main_graph, head, vexit, &dom) {
+                eprintln!("cycle discovered: {}", head.index());
+            } else {
+                progress = match_acyclic(
+                    &mut main_graph,
+                    head,
+                    vexit,
+                    &mut seq_count,
+                    &mut block_store,
+                    &mut region_arena,
+                    &mut block_to_region,
+                    &dom,
+                );
+                if progress {
+                    break;
+                }
+            }
+        }
+
+        if !progress {
+            break;
         }
     }
 
