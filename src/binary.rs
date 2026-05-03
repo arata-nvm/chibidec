@@ -9,38 +9,6 @@ pub struct Binary<'a> {
     binary: MachO<'a>,
 }
 
-#[derive(Debug)]
-pub struct Section {
-    pub addr: u64,
-    pub name: String,
-    pub data: Vec<u8>,
-}
-
-impl From<(goblin::mach::segment::Section, &[u8])> for Section {
-    fn from((section, data): (goblin::mach::segment::Section, &[u8])) -> Self {
-        Self {
-            addr: section.addr,
-            name: section.name().unwrap_or_default().to_string(),
-            data: data.to_vec(),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct Symbol {
-    pub addr: u64,
-    pub name: String,
-}
-
-impl From<(&str, goblin::mach::symbols::Nlist)> for Symbol {
-    fn from((name, symbol): (&str, goblin::mach::symbols::Nlist)) -> Self {
-        Self {
-            addr: symbol.n_value,
-            name: name.to_string(),
-        }
-    }
-}
-
 impl<'a> Binary<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self> {
         let object = Object::parse(bytes)?;
@@ -77,5 +45,61 @@ impl<'a> Binary<'a> {
             .collect();
         symbols.sort_by_key(|symbol| symbol.addr);
         symbols
+    }
+}
+
+#[derive(Debug)]
+pub struct Section {
+    addr: u64,
+    name: String,
+    data: Vec<u8>,
+}
+
+impl Section {
+    pub fn addr(&self) -> u64 {
+        self.addr
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+impl From<(goblin::mach::segment::Section, &[u8])> for Section {
+    fn from((section, data): (goblin::mach::segment::Section, &[u8])) -> Self {
+        Self {
+            addr: section.addr,
+            name: section.name().unwrap_or_default().to_string(),
+            data: data.to_vec(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Symbol {
+    addr: u64,
+    name: String,
+}
+
+impl Symbol {
+    pub fn addr(&self) -> u64 {
+        self.addr
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl From<(&str, goblin::mach::symbols::Nlist)> for Symbol {
+    fn from((name, symbol): (&str, goblin::mach::symbols::Nlist)) -> Self {
+        Self {
+            addr: symbol.n_value,
+            name: name.to_string(),
+        }
     }
 }

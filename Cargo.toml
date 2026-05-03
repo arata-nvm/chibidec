@@ -7,4 +7,5 @@ edition = "2024"
 anyhow = "1.0.102"
 capstone = { version = "0.14.0" }
 goblin = { version = "0.10.5" }
+id-arena = "2.3.0"
 petgraph = "0.8.3"
