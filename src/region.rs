@@ -200,7 +200,7 @@ fn remove_nodes(
     except: Option<NodeIndex>,
 ) {
     for &node in nodes {
-        if except.is_none_or(|except| node == except) {
+        if except.is_some_and(|except| node == except) {
             continue;
         }
         let Some(&block_id) = cfg.node_weight(node) else {
