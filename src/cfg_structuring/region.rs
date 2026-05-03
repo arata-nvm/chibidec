@@ -6,6 +6,7 @@ use petgraph::{
 
 use crate::{
     cfg_recovery::cfg::{BlockId, Condition, EdgeLabel},
+    dot::export_region_cfg_to_dot,
     graph::{IndexedGraph, IndexedGraphView, IndexedGraphViewMut},
 };
 
@@ -33,7 +34,7 @@ pub enum Region {
 
 #[derive(Debug, Clone)]
 pub struct RegionCfg {
-    arena: Arena<Region>,
+    regions: Arena<Region>,
     inner: IndexedGraph<RegionId, EdgeLabel>,
     vexit: NodeIndex,
 }
@@ -56,14 +57,14 @@ impl IndexedGraphViewMut for RegionCfg {
 impl RegionCfg {
     pub(crate) fn with_capacity(nodes: usize, edges: usize) -> Self {
         Self {
-            arena: Arena::new(),
+            regions: Arena::new(),
             inner: IndexedGraph::with_capacity(nodes, edges),
             vexit: NodeIndex::new(usize::MAX),
         }
     }
 
     pub(crate) fn add_region(&mut self, region: Region) -> (RegionId, NodeIndex) {
-        let region_id = self.arena.alloc(region);
+        let region_id = self.regions.alloc(region);
         let node = self.add_node(region_id);
         (region_id, node)
     }
@@ -164,5 +165,9 @@ impl RegionCfg {
                 self.graph_mut().add_edge(source, target, weight);
             }
         }
+    }
+
+    pub fn dot(&self) -> String {
+        export_region_cfg_to_dot(&self.regions, self.graph())
     }
 }

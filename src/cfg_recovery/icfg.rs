@@ -4,6 +4,7 @@ use id_arena::Arena;
 use petgraph::graph::NodeIndex;
 use petgraph::{prelude::StableGraph, visit::Dfs};
 
+use crate::dot::export_cfg_to_dot;
 use crate::{
     cfg_recovery::cfg::{Block, BlockId, Cfg, EdgeLabel},
     disassemble::Instruction,
@@ -83,6 +84,10 @@ impl Icfg {
         let func_graph = reachable_subgraph(self.graph(), entry_node);
         let cfg = Cfg::from_graph(self.blocks, func_graph, entry_block);
         Some(cfg)
+    }
+
+    pub fn dot(&self) -> String {
+        export_cfg_to_dot(&self.blocks, self.graph())
     }
 }
 

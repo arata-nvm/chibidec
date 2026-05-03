@@ -11,6 +11,7 @@ pub mod binary;
 pub mod cfg_recovery;
 pub mod cfg_structuring;
 pub mod disassemble;
+pub mod dot;
 pub mod graph;
 
 pub fn decompile(binary_path: &Path) -> Result<()> {
@@ -23,15 +24,15 @@ pub fn decompile(binary_path: &Path) -> Result<()> {
     let text_insns = disassemble(text_section.data(), text_section.addr())
         .context("failed to disassemble __text section")?;
     let icfg = recover_cfg(&text_insns, &binary.symbols());
+    std::fs::write("tmp/icfg.dot", icfg.dot())?;
+
     let main_cfg = icfg
         .extract_function_by_label("_main")
         .context("failed to extract main function cfg")?;
-    let _structured_cfg = structure_cfg(&main_cfg).context("failed to structure cfg")?;
+    std::fs::write("tmp/cfg.dot", main_cfg.dot())?;
 
-    // println!(
-    //     "{}",
-    //     region_cfg_dot(&region_cfg, &region_arena, &block_arena)
-    // );
+    let structured_cfg = structure_cfg(&main_cfg).context("failed to structure cfg")?;
+    std::fs::write("tmp/structured_cfg.dot", structured_cfg.dot())?;
 
     Ok(())
 }

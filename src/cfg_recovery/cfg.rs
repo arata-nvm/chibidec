@@ -5,6 +5,7 @@ use petgraph::{graph::NodeIndex, prelude::StableGraph};
 
 use crate::{
     disassemble::{ConditionKind, Instruction},
+    dot::export_cfg_to_dot,
     graph::{IndexedGraph, IndexedGraphView},
 };
 
@@ -160,5 +161,9 @@ impl Cfg {
 
     pub fn entry(&self) -> NodeIndex {
         self.entry
+    }
+
+    pub fn dot(&self) -> String {
+        export_cfg_to_dot(&self.blocks, self.graph())
     }
 }
