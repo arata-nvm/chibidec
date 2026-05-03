@@ -22,6 +22,7 @@ use crate::{
 pub fn structure_cfg(cfg: &Cfg) -> Result<RegionCfg> {
     let mut region_cfg = build_region_cfg(cfg).context("failed to create region cfg")?;
 
+    let mut count = 0;
     while region_cfg.graph().node_count() > 2 {
         let entry = region_cfg.entry().context("failed to find entry region")?;
         let dom = dominators::simple_fast(region_cfg.graph(), entry);
@@ -34,6 +35,9 @@ pub fn structure_cfg(cfg: &Cfg) -> Result<RegionCfg> {
             } else {
                 progress = match_seq(&mut region_cfg, head);
                 if progress {
+                    std::fs::write(format!("tmp/region_cfg_{}.dot", count), region_cfg.dot())
+                        .expect("failed to write region cfg dot file");
+                    count += 1;
                     break;
                 }
             }
