@@ -1,10 +1,17 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt};
 
 use petgraph::{Direction, algo::dominators::Dominators, graph::NodeIndex, visit::EdgeRef};
 
-use crate::cfg::{BlockId, BlockStore, Cfg, Condition, dot};
+use crate::cfg::{BlockArena, BlockId, Cfg, Condition, dot};
 
-pub type RegionId = usize;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RegionId(usize);
+
+impl fmt::Display for RegionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Region{}", self.0)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum Region {
@@ -36,13 +43,13 @@ impl RegionArena {
     }
 
     pub fn alloc(&mut self, region: Region) -> RegionId {
-        let id = self.regions.len();
+        let id = RegionId(self.regions.len());
         self.regions.push(region);
         id
     }
 
     pub fn get(&self, id: RegionId) -> &Region {
-        &self.regions[id]
+        &self.regions[id.0]
     }
 
     pub fn attach_seq(
@@ -124,8 +131,8 @@ pub fn match_acyclic(
     head: NodeIndex,
     vexit: NodeIndex,
     seq_count: &mut usize,
-    block_store: &mut BlockStore,
-    regions: &mut RegionArena,
+    block_arena: &mut BlockArena,
+    region_arena: &mut RegionArena,
     block_to_region: &mut HashMap<BlockId, RegionId>,
     dom: &Dominators<NodeIndex>,
 ) -> bool {
@@ -135,9 +142,9 @@ pub fn match_acyclic(
             .map(|&node_index| cfg.node_weight(node_index).unwrap())
             .copied()
             .collect();
-        let seq_block = contract_seq(cfg, &seq, seq_count, block_store);
-        regions.attach_seq(seq_block, seq_inners, block_to_region);
-        let _ = std::fs::write("./seq.dot", dot(cfg, block_store));
+        let seq_block = contract_seq(cfg, &seq, seq_count, block_arena);
+        region_arena.attach_seq(seq_block, seq_inners, block_to_region);
+        let _ = std::fs::write("./seq.dot", dot(cfg, block_arena));
         return true;
     }
     false
@@ -147,24 +154,24 @@ fn contract_seq(
     cfg: &mut Cfg,
     seq: &[NodeIndex],
     seq_count: &mut usize,
-    block_store: &mut BlockStore,
+    block_arena: &mut BlockArena,
 ) -> BlockId {
     let seq_head = seq.first().unwrap();
     let seq_tail = seq.last().unwrap();
 
-    let seq_block_id = block_store.new_block(
+    let seq_block_id = block_arena.new_block(
         0,
         0,
         Vec::new(),
         Some(format!("contracted seq {}", *seq_count)),
     );
-    let seq_node = block_store.add_block_to_graph(cfg, seq_block_id);
+    let seq_node = block_arena.add_block_to_graph(cfg, seq_block_id);
 
     redirect_edges(cfg, *seq_head, seq_node, Direction::Incoming);
     redirect_edges(cfg, *seq_tail, seq_node, Direction::Outgoing);
 
     *seq_count += 1;
-    remove_nodes(cfg, block_store, seq, None);
+    remove_nodes(cfg, block_arena, seq, None);
     seq_block_id
 }
 
@@ -195,7 +202,7 @@ fn redirect_edges(cfg: &mut Cfg, target: NodeIndex, new_target: NodeIndex, dir: 
 
 fn remove_nodes(
     cfg: &mut Cfg,
-    block_store: &mut BlockStore,
+    block_arena: &mut BlockArena,
     nodes: &[NodeIndex],
     except: Option<NodeIndex>,
 ) {
@@ -206,7 +213,7 @@ fn remove_nodes(
         let Some(&block_id) = cfg.node_weight(node) else {
             continue;
         };
-        if let Err(e) = block_store.remove_block_from_graph(cfg, block_id) {
+        if let Err(e) = block_arena.remove_block_from_graph(cfg, block_id) {
             eprintln!("failed to remove block {} from graph: {}", block_id, e);
         }
     }

@@ -9,7 +9,7 @@ use petgraph::{
 use crate::{
     binary::{Binary, Symbol},
     cfg::{
-        BlockId, BlockStore, add_virtual_exit, construct_blocks, construct_graph, dot,
+        BlockArena, BlockId, add_virtual_exit, construct_blocks, construct_graph, dot,
         extract_main, find_block_start_addrs, find_entry_node, has_backedge,
     },
     region::{Region, RegionArena, match_acyclic},
@@ -37,17 +37,17 @@ pub fn decompile(binary_path: &Path) -> Result<()> {
         .map(|insn| (insn.addr, insn))
         .collect();
 
-    let mut block_store = BlockStore::new();
-    let block_ids = construct_blocks(&mut block_store, &addr_to_insn, &starts)
+    let mut block_arena = BlockArena::new();
+    let block_ids = construct_blocks(&mut block_arena, &addr_to_insn, &starts)
         .context("failed to construct blocks")?;
-    label_blocks(&mut block_store, &block_ids, &symbols);
+    label_blocks(&mut block_arena, &block_ids, &symbols);
     let graph =
-        construct_graph(&mut block_store, &addr_to_insn).context("failed to construct graph")?;
-    let main_graph = extract_main(&graph, &block_store).context("failed to extract main graph")?;
-    let (mut main_graph, vexit) = add_virtual_exit(main_graph, &mut block_store)
+        construct_graph(&mut block_arena, &addr_to_insn).context("failed to construct graph")?;
+    let main_graph = extract_main(&graph, &block_arena).context("failed to extract main graph")?;
+    let (mut main_graph, vexit) = add_virtual_exit(main_graph, &mut block_arena)
         .context("failed to add virtual exit node")?;
 
-    println!("{}", dot(&main_graph, &block_store));
+    println!("{}", dot(&main_graph, &block_arena));
 
     let mut region_arena = RegionArena::new();
     let mut block_to_region = HashMap::new();
@@ -78,7 +78,7 @@ pub fn decompile(binary_path: &Path) -> Result<()> {
                     head,
                     vexit,
                     &mut seq_count,
-                    &mut block_store,
+                    &mut block_arena,
                     &mut region_arena,
                     &mut block_to_region,
                     &dom,
@@ -97,9 +97,9 @@ pub fn decompile(binary_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn label_blocks(block_store: &mut BlockStore, block_ids: &[BlockId], symbols: &[Symbol]) {
+fn label_blocks(block_arena: &mut BlockArena, block_ids: &[BlockId], symbols: &[Symbol]) {
     for block_id in block_ids {
-        let block = block_store.get_mut(*block_id);
+        let block = block_arena.get_mut(*block_id);
         if let Some(symbol) = symbols.iter().find(|symbol| symbol.addr == block.start) {
             block.label = Some(symbol.name.clone());
         }

@@ -17,19 +17,7 @@ use petgraph::{
 use crate::disassemble::Instruction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BlockId(u32);
-
-impl BlockId {
-    pub fn new(id: u32) -> Self {
-        Self(id)
-    }
-}
-
-impl From<BlockId> for u32 {
-    fn from(block_id: BlockId) -> Self {
-        block_id.0
-    }
-}
+pub struct BlockId(usize);
 
 impl fmt::Display for BlockId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -77,23 +65,22 @@ impl Block {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct BlockStore {
-    next_id: u32,
-    blocks: HashMap<BlockId, Block>,
+pub struct BlockArena {
+    blocks: Vec<Block>,
     block_to_node: HashMap<BlockId, Option<NodeIndex>>,
 }
 
-impl BlockStore {
+impl BlockArena {
     pub fn new() -> Self {
         Self::default()
     }
 
     pub fn get(&self, id: BlockId) -> &Block {
-        self.blocks.get(&id).expect("Block not found")
+        &self.blocks[id.0]
     }
 
     pub fn get_mut(&mut self, id: BlockId) -> &mut Block {
-        self.blocks.get_mut(&id).expect("Block not found")
+        &mut self.blocks[id.0]
     }
 
     pub fn new_block(
@@ -103,10 +90,9 @@ impl BlockStore {
         instructions: Vec<Instruction>,
         label: Option<String>,
     ) -> BlockId {
-        let id = BlockId::new(self.next_id);
-        self.next_id += 1;
+        let id = BlockId(self.blocks.len());
         let block = Block::new(id, start, end, instructions, label);
-        self.blocks.insert(id, block);
+        self.blocks.push(block);
         id
     }
 
@@ -138,7 +124,7 @@ impl BlockStore {
     }
 
     pub fn iter_blocks(&self) -> impl Iterator<Item = &Block> {
-        self.blocks.values()
+        self.blocks.iter()
     }
 
     pub fn build_initial_cfg(&mut self) -> (Cfg, HashMap<u64, NodeIndex>) {
@@ -147,7 +133,7 @@ impl BlockStore {
 
         let blocks: Vec<_> = self
             .blocks
-            .values()
+            .iter()
             .map(|block| (block.id, block.start))
             .collect();
         let addr_to_node = blocks
@@ -255,7 +241,7 @@ pub fn find_block_start_addrs(insns: &[Instruction]) -> HashSet<u64> {
 }
 
 pub fn construct_blocks(
-    block_store: &mut BlockStore,
+    block_arena: &mut BlockArena,
     addr_to_insn: &HashMap<u64, Instruction>,
     starts: &HashSet<u64>,
 ) -> Result<Vec<BlockId>> {
@@ -296,7 +282,7 @@ pub fn construct_blocks(
             .last()
             .context("current block has no instructions")?
             .addr;
-        let block = block_store.new_block(start_addr, end_addr, cur_block_insns, None);
+        let block = block_arena.new_block(start_addr, end_addr, cur_block_insns, None);
         blocks.push(block);
     }
 
@@ -304,11 +290,11 @@ pub fn construct_blocks(
 }
 
 pub fn construct_graph(
-    block_store: &mut BlockStore,
+    block_arena: &mut BlockArena,
     addr_to_insn: &HashMap<u64, Instruction>,
 ) -> Result<Cfg> {
-    let (mut graph, addr_to_node) = block_store.build_initial_cfg();
-    for block in block_store.iter_blocks() {
+    let (mut graph, addr_to_node) = block_arena.build_initial_cfg();
+    for block in block_arena.iter_blocks() {
         let term_insn = block.terminator().context("block has no terminator")?;
         if term_insn.is_ret() {
             continue;
@@ -350,11 +336,11 @@ pub fn construct_graph(
     Ok(graph)
 }
 
-pub fn extract_main(graph: &Cfg, block_store: &BlockStore) -> Result<Cfg> {
+pub fn extract_main(graph: &Cfg, block_arena: &BlockArena) -> Result<Cfg> {
     let main_entry_node = graph
         .node_indices()
         .find(|&idx| {
-            block_store.get(*graph.node_weight(idx).unwrap()).label == Some("_main".into())
+            block_arena.get(*graph.node_weight(idx).unwrap()).label == Some("_main".into())
         })
         .context("failed to find main function")?;
     Ok(reachable_subgraph(graph, main_entry_node))
@@ -391,13 +377,13 @@ fn get_next_insn(
     addr_to_insn.get(&next_addr).cloned()
 }
 
-pub fn dot(graph: &Cfg, block_store: &BlockStore) -> String {
+pub fn dot(graph: &Cfg, block_arena: &BlockArena) -> String {
     let get_edge_attributes = |_, edge: EdgeReference<'_, EdgeLabel>| match edge.weight().color() {
         Some(color) => format!(r#"color = "{color}""#),
         None => String::new(),
     };
     let get_node_attributes = |_, (node_index, &block_id): (NodeIndex, _)| {
-        let block = block_store.get(block_id);
+        let block = block_arena.get(block_id);
         let mut lines = vec![
             format!(
                 "{}({}, {:?}) [{:#x}-{:#x}]",
@@ -430,11 +416,11 @@ fn escape_dot_label(label: String) -> String {
         + r"\l"
 }
 
-pub fn add_virtual_exit(mut graph: Cfg, block_store: &mut BlockStore) -> Result<(Cfg, NodeIndex)> {
+pub fn add_virtual_exit(mut graph: Cfg, block_arena: &mut BlockArena) -> Result<(Cfg, NodeIndex)> {
     let exit_nodes: Vec<_> = graph.externals(Direction::Outgoing).collect();
     assert!(!exit_nodes.is_empty());
-    let vexit_block = block_store.new_block(0, 0, vec![], Some("vexit".into()));
-    let vexit_node = block_store.add_block_to_graph(&mut graph, vexit_block);
+    let vexit_block = block_arena.new_block(0, 0, vec![], Some("vexit".into()));
+    let vexit_node = block_arena.add_block_to_graph(&mut graph, vexit_block);
     for exit_node in exit_nodes {
         graph.add_edge(exit_node, vexit_node, EdgeLabel::Unconditional);
     }
