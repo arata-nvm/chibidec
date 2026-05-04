@@ -90,16 +90,16 @@ impl RegionCfg {
         self.graph().edges_directed(node, direction).count()
     }
 
-    pub(crate) fn has_backedge(&self, node: NodeIndex, dominators: &Dominators<NodeIndex>) -> bool {
-        if node == self.vexit {
-            return false;
-        }
+    pub(crate) fn backedge_targets(
+        &self,
+        node: NodeIndex,
+        dominators: &Dominators<NodeIndex>,
+    ) -> impl Iterator<Item = NodeIndex> {
         return self
             .graph()
-            .edges_directed(node, Direction::Outgoing)
-            .any(|edge| dominates(edge.target(), node, dominators));
+            .neighbors_directed(node, Direction::Outgoing)
+            .filter(move |&succ| dominates(succ, node, dominators));
 
-        // returns true if node1 dominates node2
         fn dominates(
             node1: NodeIndex,
             node2: NodeIndex,
@@ -111,22 +111,24 @@ impl RegionCfg {
         }
     }
 
+    pub(crate) fn has_backedge(&self, node: NodeIndex, dominators: &Dominators<NodeIndex>) -> bool {
+        if node == self.vexit {
+            return false;
+        }
+        self.backedge_targets(node, dominators).next().is_some()
+    }
+
     // nodeのdir方向の隣接ノードが1つだけ存在する場合は、そのノードを返す。それ以外の場合はNoneを返す。
     pub(crate) fn neighbor_if_one(
         &self,
         node: NodeIndex,
         direction: Direction,
     ) -> Option<NodeIndex> {
-        let mut neighbors = self.graph().edges_directed(node, direction);
-        let neighbor = neighbors.next()?;
-        let neighbor_node = match direction {
-            Direction::Incoming => neighbor.source(),
-            Direction::Outgoing => neighbor.target(),
+        let mut neighbors = self.graph().neighbors_directed(node, direction);
+        let (Some(neighbor), None) = (neighbors.next(), neighbors.next()) else {
+            return None;
         };
-        match neighbors.next() {
-            None => Some(neighbor_node),
-            Some(_) => None,
-        }
+        Some(neighbor)
     }
 
     pub(crate) fn redirect_edges(

@@ -121,6 +121,18 @@ pub enum EdgeLabel {
 }
 
 impl EdgeLabel {
+    pub fn is_branch(&self) -> bool {
+        matches!(self, Self::TrueBranch(_) | Self::FalseBranch(_))
+    }
+
+    pub fn effective_condition(&self) -> Option<Condition> {
+        match self {
+            Self::TrueBranch(cond) => cond.clone(),
+            Self::FalseBranch(cond) => cond.clone().map(|c| c.negate()),
+            Self::Unconditional | Self::Virtualized => None,
+        }
+    }
+
     pub fn color(&self) -> Option<&'static str> {
         match self {
             Self::TrueBranch(_) => Some("green"),

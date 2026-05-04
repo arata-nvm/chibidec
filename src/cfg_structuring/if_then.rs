@@ -1,6 +1,6 @@
 use std::collections::{HashSet, VecDeque};
 
-use petgraph::{Direction, algo::dominators::Dominators, graph::NodeIndex, visit::EdgeRef};
+use petgraph::{Direction, algo::dominators::Dominators, graph::NodeIndex};
 
 use crate::{
     cfg_recovery::cfg::{Condition, EdgeLabel},
@@ -93,11 +93,9 @@ fn find_if(
     let head_to_other = cfg
         .edge_label(head, other_entry)
         .expect("missing edge from head to join");
-    let cond = match (head_to_then, head_to_other) {
-        (EdgeLabel::FalseBranch(c1), EdgeLabel::TrueBranch(_)) => c1.clone().map(|c| c.negate()),
-        (EdgeLabel::TrueBranch(c1), EdgeLabel::FalseBranch(_)) => c1.clone(),
-        _ => return None,
-    };
+    if !head_to_then.is_branch() || !head_to_other.is_branch() {
+        return None;
+    }
 
     let then_nodes = collect_nodes_between(cfg, dom, pdom, head, then_entry, join);
     if then_nodes.is_empty() || contains_sess_violation(cfg, head, then_entry, &then_nodes, join) {
@@ -109,7 +107,6 @@ fn find_if(
             let else_nodes = collect_nodes_between(cfg, dom, pdom, head, else_entry, join);
             if else_nodes.is_empty()
                 || contains_sess_violation(cfg, head, else_entry, &else_nodes, join)
-                || !then_nodes.is_disjoint(&else_nodes)
             {
                 return None;
             }
@@ -144,7 +141,7 @@ fn find_if(
         join: cfg
             .key_for_node(join)
             .expect("missing region node for join"),
-        cond,
+        cond: head_to_then.effective_condition(),
     })
 }
 
@@ -230,8 +227,8 @@ fn collect_nodes_between(
         }
 
         visited.insert(u);
-        for v in cfg.graph().neighbors_directed(u, Direction::Outgoing) {
-            queue.push_back(v);
+        for succ in cfg.graph().neighbors_directed(u, Direction::Outgoing) {
+            queue.push_back(succ);
         }
     }
     visited
@@ -248,12 +245,11 @@ fn contains_sess_violation(
     // then_nodes以外のノードからの入辺が存在してはならない
     // ただし、headからthenへのエッジは存在してもよい
     for &node in body_nodes {
-        for edge in cfg.graph().edges_directed(node, Direction::Incoming) {
-            let source = edge.source();
-            if source == head && node == body_entry {
+        for pred in cfg.graph().neighbors_directed(node, Direction::Incoming) {
+            if pred == head && node == body_entry {
                 continue;
             }
-            if !body_nodes.contains(&source) {
+            if !body_nodes.contains(&pred) {
                 return true;
             }
         }
@@ -261,18 +257,16 @@ fn contains_sess_violation(
 
     // then_nodes,join以外のノードへの出辺が存在してはならない
     for &node in body_nodes {
-        for edge in cfg.graph().edges_directed(node, Direction::Outgoing) {
-            let target = edge.target();
-            if !(body_nodes.contains(&target) || target == join) {
+        for succ in cfg.graph().neighbors_directed(node, Direction::Outgoing) {
+            if !(body_nodes.contains(&succ) || succ == join) {
                 return true;
             }
         }
     }
 
     // headについて、then_entry以外にthen_nodesへの出辺が存在してはならない
-    for edge in cfg.graph().edges_directed(head, Direction::Outgoing) {
-        let target = edge.target();
-        if body_nodes.contains(&target) && target != body_entry {
+    for succ in cfg.graph().neighbors_directed(head, Direction::Outgoing) {
+        if body_nodes.contains(&succ) && succ != body_entry {
             return true;
         }
     }
