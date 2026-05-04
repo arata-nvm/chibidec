@@ -1,4 +1,4 @@
-TARGETS = helloworld if-else for if
+TARGETS = helloworld if-then-else for if-then
 CFLAGS = -O0
 
 .PHONY: all
