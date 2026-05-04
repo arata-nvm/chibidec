@@ -167,6 +167,16 @@ impl RegionCfg {
         }
     }
 
+    pub fn edge_label(&self, from: NodeIndex, to: NodeIndex) -> Option<&EdgeLabel> {
+        let edge = self.graph().find_edge(from, to)?;
+        self.graph().edge_weight(edge)
+    }
+
+    pub fn remove_edge_label(&mut self, from: NodeIndex, to: NodeIndex) -> Option<EdgeLabel> {
+        let edge = self.graph().find_edge(from, to)?;
+        self.graph_mut().remove_edge(edge)
+    }
+
     pub fn dot(&self) -> String {
         export_region_cfg_to_dot(&self.regions, self.graph())
     }

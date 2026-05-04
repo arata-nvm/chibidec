@@ -95,6 +95,15 @@ impl Condition {
             ConditionKind::GreaterOrEqual => Some(Self::new(">", "TODO", "TODO")),
         }
     }
+
+    pub fn negate(&self) -> Self {
+        let negated_op = match self.op.as_str() {
+            "!=" => "==",
+            ">" => "<=",
+            _ => unimplemented!("unsupported condition operator: {}", self.op),
+        };
+        Self::new(negated_op, self.lhs.clone(), self.rhs.clone())
+    }
 }
 
 impl fmt::Display for Condition {
