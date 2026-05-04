@@ -16,16 +16,10 @@ pub type RegionId = Id<Region>;
 pub enum Region {
     Leaf(BlockId),
     Seq(Vec<RegionId>),
-    IfThen {
+    If {
         head: RegionId,
         then_br: Vec<RegionId>,
-        join: RegionId,
-        cond: Option<Condition>,
-    },
-    IfThenElse {
-        head: RegionId,
-        then_br: Vec<RegionId>,
-        else_br: Vec<RegionId>,
+        else_br: Option<Vec<RegionId>>,
         join: RegionId,
         cond: Option<Condition>,
     },
