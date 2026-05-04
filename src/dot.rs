@@ -52,7 +52,7 @@ pub(crate) fn export_region_cfg_to_dot(
     };
     let get_node_attributes = |_, (_, &region_id)| {
         let region = regions.get(region_id).expect("region_id must be valid");
-        let label = format!("{region:?}");
+        let label = format!("{region_id:?}\n{region:?}");
         format!(r#"label = "{}""#, escape_dot_label(label))
     };
     let dot = Dot::with_attr_getters(
