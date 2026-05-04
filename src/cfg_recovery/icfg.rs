@@ -58,15 +58,7 @@ impl Icfg {
         let block = self
             .blocks
             .alloc_with_id(|id| Block::new(id, start, end, insns, None));
-        self.add_node(block)
-    }
-
-    pub fn graph(&self) -> &StableGraph<BlockId, EdgeLabel> {
-        IndexedGraphView::graph(self)
-    }
-
-    pub(crate) fn graph_mut(&mut self) -> &mut StableGraph<BlockId, EdgeLabel> {
-        IndexedGraphViewMut::graph_mut(self)
+        self.inner.add_node(block)
     }
 
     pub fn extract_function_by_label(self, label: &str) -> Option<Cfg> {

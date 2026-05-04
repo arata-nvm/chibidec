@@ -100,12 +100,4 @@ pub(crate) trait IndexedGraphViewMut: IndexedGraphView {
     fn graph_mut(&mut self) -> &mut StableGraph<Self::Key, Self::Edge> {
         self.inner_mut().graph_mut()
     }
-
-    fn add_node(&mut self, key: Self::Key) -> NodeIndex {
-        self.inner_mut().add_node(key)
-    }
-
-    fn remove_node(&mut self, key: Self::Key) -> Result<()> {
-        self.inner_mut().remove_node(key)
-    }
 }

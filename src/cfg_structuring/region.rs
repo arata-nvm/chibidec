@@ -65,7 +65,7 @@ impl RegionCfg {
 
     pub(crate) fn add_region(&mut self, region: Region) -> (RegionId, NodeIndex) {
         let region_id = self.regions.alloc(region);
-        let node = self.add_node(region_id);
+        let node = self.inner.add_node(region_id);
         (region_id, node)
     }
 
@@ -85,7 +85,7 @@ impl RegionCfg {
         let key = self
             .key_for_node(node)
             .ok_or_else(|| anyhow!("graph node not found for index: {node:?}"))?;
-        self.remove_node(key)
+        self.inner.remove_node(key)
     }
 
     pub(crate) fn entry(&self) -> Option<NodeIndex> {

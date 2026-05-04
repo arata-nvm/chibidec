@@ -12,6 +12,7 @@ use crate::{
         icfg::Icfg,
     },
     disassemble::{Instruction, InstructionSequence},
+    graph::IndexedGraphViewMut,
 };
 
 pub fn recover_cfg(insns: &InstructionSequence, symbols: &[Symbol]) -> Icfg {
