@@ -15,7 +15,7 @@ use petgraph::{
 use crate::{
     cfg_recovery::cfg::{Cfg, EdgeLabel},
     cfg_structuring::{
-        if_then::match_if_then,
+        if_then::{match_if_then, match_if_then_else},
         region::{Region, RegionCfg},
         seq::match_seq,
     },
@@ -103,5 +103,7 @@ fn match_acyclic(
     pdom: &Dominators<NodeIndex>,
     head: NodeIndex,
 ) -> bool {
-    match_seq(cfg, head) || match_if_then(cfg, dom, pdom, head)
+    match_seq(cfg, head)
+        || match_if_then_else(cfg, dom, pdom, head)
+        || match_if_then(cfg, dom, pdom, head)
 }

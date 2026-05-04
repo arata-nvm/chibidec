@@ -23,6 +23,21 @@ pub(crate) fn match_if_then(
     }
 }
 
+pub(crate) fn match_if_then_else(
+    cfg: &mut RegionCfg,
+    dom: &Dominators<NodeIndex>,
+    pdom: &Dominators<NodeIndex>,
+    head: NodeIndex,
+) -> bool {
+    match find_if_then_else(cfg, dom, pdom, head) {
+        Some(if_schema) => {
+            contract_if_then_else(cfg, if_schema);
+            true
+        }
+        None => false,
+    }
+}
+
 #[derive(Debug)]
 pub struct IfSchema {
     pub head: RegionId,
@@ -82,7 +97,7 @@ fn find_if_then(
     };
 
     let then_nodes = collect_nodes_between(cfg, dom, pdom, head, then_entry, join);
-    if then_nodes.is_empty() || contains_sess_violation(cfg, head, then_entry, join, &then_nodes) {
+    if then_nodes.is_empty() || contains_sess_violation(cfg, head, then_entry, &then_nodes, join) {
         return None;
     }
 
@@ -158,6 +173,133 @@ fn contract_if_then(cfg: &mut RegionCfg, if_schema: IfSchema) -> RegionId {
     if_then_region_id
 }
 
+fn find_if_then_else(
+    cfg: &RegionCfg,
+    dom: &Dominators<NodeIndex>,
+    pdom: &Dominators<NodeIndex>,
+    head: NodeIndex,
+) -> Option<IfSchema> {
+    let mut succs = cfg.graph().neighbors_directed(head, Direction::Outgoing);
+    let succ1 = succs.next()?;
+    let succ2 = succs.next()?;
+    if succs.next().is_some() || succ1 == cfg.vexit() || succ2 == cfg.vexit() {
+        return None;
+    }
+
+    let join = pdom.immediate_dominator(head)?;
+    if succ1 == join || succ2 == join {
+        return None;
+    }
+
+    let (then_entry, else_entry) = (succ1, succ2);
+
+    let then_nodes = collect_nodes_between(cfg, dom, pdom, head, then_entry, join);
+    let else_nodes = collect_nodes_between(cfg, dom, pdom, head, else_entry, join);
+    if then_nodes.is_empty() || contains_sess_violation(cfg, head, then_entry, &then_nodes, join) {
+        return None;
+    }
+    if else_nodes.is_empty() || contains_sess_violation(cfg, head, else_entry, &else_nodes, join) {
+        return None;
+    }
+    if !then_nodes.is_disjoint(&else_nodes) {
+        return None;
+    }
+
+    let head_to_then = cfg
+        .edge_label(head, then_entry)
+        .expect("missing edge from head to then_entry");
+    let head_to_else = cfg
+        .edge_label(head, else_entry)
+        .expect("missing edge from head to else_entry");
+    let cond = match (head_to_then, head_to_else) {
+        (EdgeLabel::FalseBranch(c1), EdgeLabel::TrueBranch(_)) => c1.clone().map(|c| c.negate()),
+        (EdgeLabel::TrueBranch(c1), EdgeLabel::FalseBranch(_)) => c1.clone(),
+        _ => return None,
+    };
+
+    Some(IfSchema::new(
+        cfg.key_for_node(head)
+            .expect("missing region node for head"),
+        then_nodes
+            .into_iter()
+            .map(|node| {
+                cfg.key_for_node(node)
+                    .expect("missing region node for then node")
+            })
+            .collect(),
+        Some(
+            else_nodes
+                .into_iter()
+                .map(|node| {
+                    cfg.key_for_node(node)
+                        .expect("missing region node for else node")
+                })
+                .collect(),
+        ),
+        cfg.key_for_node(join)
+            .expect("missing region node for join"),
+        cond,
+    ))
+}
+
+fn contract_if_then_else(cfg: &mut RegionCfg, if_schema: IfSchema) -> RegionId {
+    let head_node = cfg
+        .node_for_key(if_schema.head)
+        .expect("missing node for if_node");
+    let join_node = cfg
+        .node_for_key(if_schema.join)
+        .expect("missing node for join_node");
+
+    let nodes: Vec<_> = if_schema
+        .all_regions()
+        .into_iter()
+        .map(|key| {
+            cfg.node_for_key(key)
+                .expect("missing node for if schema node")
+        })
+        .collect();
+
+    let if_then_else_region = Region::IfThenElse {
+        head: if_schema.head,
+        then_br: if_schema.then_body.clone(),
+        else_br: if_schema
+            .else_body
+            .clone()
+            .expect("missing else body in if-then-else schema"),
+        join: if_schema.join,
+        cond: if_schema.cond,
+    };
+    let (if_then_else_region_id, if_then_else_node) = cfg.add_region(if_then_else_region);
+
+    cfg.redirect_edges(head_node, if_then_else_node, Direction::Incoming);
+    if let Some(then_tail) = if_schema.then_body.last() {
+        let then_tail_node = cfg
+            .node_for_key(*then_tail)
+            .expect("missing node for then tail");
+        cfg.remove_edge_label(then_tail_node, join_node)
+            .expect("missing edge from then tail to join");
+    }
+    if let Some(else_tail) = if_schema.else_body.unwrap().last() {
+        let else_tail_node = cfg
+            .node_for_key(*else_tail)
+            .expect("missing node for else tail");
+        cfg.remove_edge_label(else_tail_node, join_node)
+            .expect("missing edge from else tail to join");
+    }
+    cfg.graph_mut()
+        .add_edge(if_then_else_node, join_node, EdgeLabel::Unconditional);
+
+    for node in nodes {
+        if node == join_node {
+            continue;
+        }
+        cfg.remove_node_by_index(node)
+            .expect("failed to remove node in if-then-else");
+    }
+
+    if_then_else_region_id
+}
+
 // headに支配され、かつjoinに後続支配されるノードを探索する
 fn collect_nodes_between(
     cfg: &RegionCfg,
@@ -202,29 +344,29 @@ fn collect_nodes_between(
 fn contains_sess_violation(
     cfg: &RegionCfg,
     head: NodeIndex,
-    then_entry: NodeIndex,
+    body_entry: NodeIndex,
+    body_nodes: &HashSet<NodeIndex>,
     join: NodeIndex,
-    then_nodes: &HashSet<NodeIndex>,
 ) -> bool {
     // then_nodes以外のノードからの入辺が存在してはならない
     // ただし、headからthenへのエッジは存在してもよい
-    for &node in then_nodes {
+    for &node in body_nodes {
         for edge in cfg.graph().edges_directed(node, Direction::Incoming) {
             let source = edge.source();
-            if source == head && node == then_entry {
+            if source == head && node == body_entry {
                 continue;
             }
-            if !then_nodes.contains(&source) {
+            if !body_nodes.contains(&source) {
                 return true;
             }
         }
     }
 
     // then_nodes,join以外のノードへの出辺が存在してはならない
-    for &node in then_nodes {
+    for &node in body_nodes {
         for edge in cfg.graph().edges_directed(node, Direction::Outgoing) {
             let target = edge.target();
-            if !(then_nodes.contains(&target) || target == join) {
+            if !(body_nodes.contains(&target) || target == join) {
                 return true;
             }
         }
@@ -233,7 +375,7 @@ fn contains_sess_violation(
     // headについて、then_entry以外にthen_nodesへの出辺が存在してはならない
     for edge in cfg.graph().edges_directed(head, Direction::Outgoing) {
         let target = edge.target();
-        if then_nodes.contains(&target) && target != then_entry {
+        if body_nodes.contains(&target) && target != body_entry {
             return true;
         }
     }
