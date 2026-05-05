@@ -4,6 +4,7 @@ use id_arena::{Arena, Id};
 use petgraph::{graph::NodeIndex, prelude::StableGraph};
 
 use crate::{
+    cfg_structuring::region::RegionId,
     disassemble::{ConditionKind, Instruction},
     dot::export_cfg_to_dot,
     graph::{IndexedGraph, IndexedGraphView},
@@ -117,7 +118,14 @@ pub enum EdgeLabel {
     Unconditional,
     TrueBranch(Option<Condition>),
     FalseBranch(Option<Condition>),
-    Virtualized,
+    Virtualized(TailKind),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TailKind {
+    Break,
+    Continue,
+    Goto { target: RegionId },
 }
 
 impl EdgeLabel {
@@ -129,7 +137,7 @@ impl EdgeLabel {
         match self {
             Self::TrueBranch(cond) => cond.clone(),
             Self::FalseBranch(cond) => cond.clone().map(|c| c.negate()),
-            Self::Unconditional | Self::Virtualized => None,
+            Self::Unconditional | Self::Virtualized(_) => None,
         }
     }
 
@@ -137,7 +145,7 @@ impl EdgeLabel {
         match self {
             Self::TrueBranch(_) => Some("green"),
             Self::FalseBranch(_) => Some("red"),
-            Self::Unconditional | Self::Virtualized => None,
+            Self::Unconditional | Self::Virtualized(_) => None,
         }
     }
 }

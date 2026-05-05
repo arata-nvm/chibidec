@@ -1,4 +1,6 @@
-use anyhow::{Result, anyhow};
+use std::collections::HashSet;
+
+use anyhow::{Result, anyhow, bail};
 use id_arena::{Arena, Id};
 use petgraph::{
     Direction,
@@ -10,13 +12,14 @@ use petgraph::{
 
 use crate::{
     cfg_recovery::cfg::{BlockId, Condition, EdgeLabel},
+    cfg_structuring::cycle::{LoopKind, StructuredLoop},
     dot::export_region_cfg_to_dot,
     graph::{IndexedGraph, IndexedGraphView, IndexedGraphViewMut},
 };
 
 pub type RegionId = Id<Region>;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Region {
     Leaf(BlockId),
     Seq(Vec<RegionId>),
@@ -26,6 +29,11 @@ pub enum Region {
         else_br: Option<Vec<RegionId>>,
         join: RegionId,
         cond: Option<Condition>,
+    },
+    Loop {
+        kind: LoopKind,
+        meta: StructuredLoop,
+        body: RegionId,
     },
     VirtualExit,
 }
@@ -67,8 +75,26 @@ impl RegionCfg {
         (region_id, node)
     }
 
-    pub(crate) fn set_vexit(&mut self, vexit: NodeIndex) {
+    pub(crate) fn region_mut(&mut self, id: RegionId) -> Option<&mut Region> {
+        self.regions.get_mut(id)
+    }
+
+    // 出口から仮想的な出口ノードへのエッジを追加し、単一の出口を持つようにする
+    pub(crate) fn add_vexit(&mut self) -> Result<NodeIndex> {
+        let exit_nodes: Vec<_> = self.graph().externals(Direction::Outgoing).collect();
+        if exit_nodes.is_empty() {
+            bail!("cfg has no exit nodes");
+        }
+
+        let (_, vexit) = self.add_region(Region::VirtualExit);
         self.vexit = vexit;
+
+        for exit_node in exit_nodes {
+            self.graph_mut()
+                .add_edge(exit_node, vexit, EdgeLabel::Unconditional);
+        }
+
+        Ok(vexit)
     }
 
     pub fn graph(&self) -> &StableGraph<RegionId, EdgeLabel> {
@@ -117,6 +143,16 @@ impl RegionCfg {
         new_target: NodeIndex,
         dir: Direction,
     ) {
+        self.redirect_edges_except(target, new_target, &HashSet::new(), dir);
+    }
+
+    pub(crate) fn redirect_edges_except(
+        &mut self,
+        target: NodeIndex,
+        new_target: NodeIndex,
+        exclude: &HashSet<NodeIndex>,
+        dir: Direction,
+    ) {
         let edges: Vec<_> = self
             .graph()
             .edges_directed(target, dir)
@@ -127,6 +163,7 @@ impl RegionCfg {
                 };
                 (edge.id(), other)
             })
+            .filter(|(_, other)| !exclude.contains(other))
             .collect();
 
         for (edge_id, other) in edges {
@@ -148,7 +185,11 @@ impl RegionCfg {
         self.graph().edge_weight(edge)
     }
 
-    pub fn remove_edge_label(&mut self, from: NodeIndex, to: NodeIndex) -> Option<EdgeLabel> {
+    pub(crate) fn remove_edge_label(
+        &mut self,
+        from: NodeIndex,
+        to: NodeIndex,
+    ) -> Option<EdgeLabel> {
         let edge = self.graph().find_edge(from, to)?;
         self.graph_mut().remove_edge(edge)
     }
@@ -189,15 +230,24 @@ impl RegionDominance {
         self.pdom.immediate_dominator(node)
     }
 
+    pub fn backedge_sources(
+        &self,
+        cfg: &RegionCfg,
+        node: NodeIndex,
+    ) -> impl Iterator<Item = NodeIndex> {
+        cfg.graph()
+            .neighbors_directed(node, Direction::Incoming)
+            .filter(move |&pred| self.dominates(node, pred))
+    }
+
     pub fn backedge_targets(
         &self,
         cfg: &RegionCfg,
         node: NodeIndex,
     ) -> impl Iterator<Item = NodeIndex> {
-        return cfg
-            .graph()
+        cfg.graph()
             .neighbors_directed(node, Direction::Outgoing)
-            .filter(move |&succ| self.dominates(succ, node));
+            .filter(move |&succ| self.dominates(succ, node))
     }
 
     pub fn has_backedge(&self, cfg: &RegionCfg, node: NodeIndex) -> bool {
