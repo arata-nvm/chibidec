@@ -34,7 +34,10 @@ pub fn decompile(binary_path: &Path) -> Result<()> {
     std::fs::write("tmp/cfg.dot", main_cfg.dot())?;
 
     let structured_cfg = structure_cfg(&main_cfg).context("failed to structure cfg")?;
-    std::fs::write("tmp/structured_cfg.dot", structured_cfg.dot())?;
+    std::fs::write(
+        "tmp/structured_cfg.dot",
+        structured_cfg.cfg.dot(&structured_cfg.regions),
+    )?;
     print!("{}", render_structured_assembly(&structured_cfg, &main_cfg));
 
     Ok(())

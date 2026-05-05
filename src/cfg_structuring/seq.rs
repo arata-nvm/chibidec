@@ -4,7 +4,7 @@ use petgraph::{Direction, graph::NodeIndex};
 
 use crate::{
     cfg_structuring::{
-        region::{RegionCfg, RegionId},
+        region::{RegionCfg, RegionId, RegionStore},
         scope::{is_in_scope, scoped_degree, scoped_neighbor_if_one},
     },
     graph::IndexedGraphView,
@@ -14,14 +14,6 @@ use super::Region;
 
 pub(crate) fn find_seq(cfg: &RegionCfg, head: NodeIndex) -> Option<Vec<NodeIndex>> {
     find_seq_with_scope(cfg, head, None)
-}
-
-pub(crate) fn find_seq_in_scope(
-    cfg: &RegionCfg,
-    head: NodeIndex,
-    scope: &HashSet<RegionId>,
-) -> Option<Vec<NodeIndex>> {
-    find_seq_with_scope(cfg, head, Some(scope))
 }
 
 fn find_seq_with_scope(
@@ -56,7 +48,11 @@ fn find_seq_with_scope(
     (chain.len() > 1).then_some(chain)
 }
 
-pub(crate) fn contract_seq(region_cfg: &mut RegionCfg, seq: &[NodeIndex]) -> RegionId {
+pub(crate) fn contract_seq(
+    region_cfg: &mut RegionCfg,
+    regions: &mut RegionStore,
+    seq: &[NodeIndex],
+) -> RegionId {
     let seq_head = seq.first().unwrap();
     let seq_tail = seq.last().unwrap();
     let seq_inners: Vec<_> = seq
@@ -64,7 +60,7 @@ pub(crate) fn contract_seq(region_cfg: &mut RegionCfg, seq: &[NodeIndex]) -> Reg
         .map(|&node_index| region_cfg.key_for_node(node_index).unwrap())
         .collect();
 
-    let (seq_region, seq_node) = region_cfg.add_region(Region::Seq(seq_inners));
+    let (seq_region, seq_node) = region_cfg.add_region(regions, Region::Seq(seq_inners));
 
     region_cfg.redirect_edges(*seq_head, seq_node, Direction::Incoming);
     region_cfg.redirect_edges(*seq_tail, seq_node, Direction::Outgoing);

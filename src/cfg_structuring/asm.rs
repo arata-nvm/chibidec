@@ -1,16 +1,18 @@
 use std::fmt::Write;
 
 use crate::{
-    cfg_recovery::cfg::{Cfg, Condition},
+    cfg_recovery::cfg::{Cfg, Condition, EdgeLabel, TailKind},
     cfg_structuring::{
+        StructuredCfg, VirtualizedEdge,
         cycle::LoopKind,
-        region::{Region, RegionCfg, RegionId},
+        region::{Region, RegionId, RegionStore},
     },
     graph::IndexedGraphView,
 };
 
-pub fn render_structured_assembly(region_cfg: &RegionCfg, cfg: &Cfg) -> String {
+pub fn render_structured_assembly(structured_cfg: &StructuredCfg, cfg: &Cfg) -> String {
     let mut out = String::new();
+    let region_cfg = &structured_cfg.cfg;
     let Some(entry) = region_cfg.entry() else {
         return out;
     };
@@ -21,26 +23,37 @@ pub fn render_structured_assembly(region_cfg: &RegionCfg, cfg: &Cfg) -> String {
         return out;
     };
 
-    fmt_region(region_cfg, cfg, root, 0, &mut out);
+    fmt_region(
+        &structured_cfg.regions,
+        &structured_cfg.virtualized_edges,
+        cfg,
+        root,
+        0,
+        &mut out,
+    );
     out
 }
 
 fn fmt_region(
-    region_cfg: &RegionCfg,
+    regions: &RegionStore,
+    virtualized_edges: &[VirtualizedEdge],
     cfg: &Cfg,
     region_id: RegionId,
     indent: usize,
     out: &mut String,
 ) {
-    let Some(region) = region_cfg.region(region_id) else {
+    let Some(region) = regions.get(region_id) else {
         return;
     };
 
     match region {
-        Region::Leaf(block_id) => fmt_block(cfg, *block_id, indent, out),
-        Region::Seq(regions) => {
-            for region in regions {
-                fmt_region(region_cfg, cfg, *region, indent, out);
+        Region::Leaf(block_id) => {
+            fmt_block(cfg, *block_id, indent, out);
+            fmt_virtualized_tail(virtualized_edges, region_id, indent, out);
+        }
+        Region::Seq(seq_regions) => {
+            for region in seq_regions {
+                fmt_region(regions, virtualized_edges, cfg, *region, indent, out);
             }
         }
         Region::If {
@@ -50,16 +63,16 @@ fn fmt_region(
             cond,
             ..
         } => {
-            fmt_region(region_cfg, cfg, *head, indent, out);
+            fmt_region(regions, virtualized_edges, cfg, *head, indent, out);
             push_line(out, indent, format_args!("if ({}) {{", display_cond(cond)));
             for region in then_br {
-                fmt_region(region_cfg, cfg, *region, indent + 1, out);
+                fmt_region(regions, virtualized_edges, cfg, *region, indent + 1, out);
             }
             match else_br {
                 Some(else_br) => {
                     push_line(out, indent, format_args!("}} else {{"));
                     for region in else_br {
-                        fmt_region(region_cfg, cfg, *region, indent + 1, out);
+                        fmt_region(regions, virtualized_edges, cfg, *region, indent + 1, out);
                     }
                     push_line(out, indent, format_args!("}}"));
                 }
@@ -71,22 +84,45 @@ fn fmt_region(
             match kind {
                 LoopKind::While => {
                     push_line(out, indent, format_args!("while ({cond}) {{"));
-                    fmt_region(region_cfg, cfg, *body, indent + 1, out);
+                    fmt_region(regions, virtualized_edges, cfg, *body, indent + 1, out);
                     push_line(out, indent, format_args!("}}"));
                 }
                 LoopKind::DoWhile => {
                     push_line(out, indent, format_args!("do {{"));
-                    fmt_region(region_cfg, cfg, *body, indent + 1, out);
+                    fmt_region(regions, virtualized_edges, cfg, *body, indent + 1, out);
                     push_line(out, indent, format_args!("}} while ({cond});"));
                 }
                 LoopKind::NatLoop => {
                     push_line(out, indent, format_args!("while ({cond}) {{"));
-                    fmt_region(region_cfg, cfg, *body, indent + 1, out);
+                    fmt_region(regions, virtualized_edges, cfg, *body, indent + 1, out);
                     push_line(out, indent, format_args!("}}"));
                 }
             }
         }
         Region::VirtualExit => {}
+    }
+}
+
+fn fmt_virtualized_tail(
+    virtualized_edges: &[VirtualizedEdge],
+    source: RegionId,
+    indent: usize,
+    out: &mut String,
+) {
+    for edge in virtualized_edges
+        .iter()
+        .filter(|edge| edge.source == source)
+    {
+        let EdgeLabel::Virtualized(tail) = &edge.label else {
+            continue;
+        };
+        match tail {
+            TailKind::Continue => push_line(out, indent, format_args!("continue;")),
+            TailKind::Break => push_line(out, indent, format_args!("break;")),
+            TailKind::Goto { target } => {
+                push_line(out, indent, format_args!("goto {target:?};"));
+            }
+        }
     }
 }
 

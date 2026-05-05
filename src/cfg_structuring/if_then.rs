@@ -5,7 +5,7 @@ use petgraph::{Direction, graph::NodeIndex};
 use crate::{
     cfg_recovery::cfg::{Condition, EdgeLabel},
     cfg_structuring::{
-        region::{Region, RegionCfg, RegionDominanceView, RegionId},
+        region::{Region, RegionCfg, RegionDominanceView, RegionId, RegionStore},
         scope::{is_in_scope, scoped_neighbors},
     },
     graph::{IndexedGraphView, IndexedGraphViewMut},
@@ -55,14 +55,6 @@ impl From<IfSchema> for Region {
 
 pub(crate) fn find_if(dominance: &RegionDominanceView<'_>, head: NodeIndex) -> Option<IfSchema> {
     find_if_with_scope(dominance, head, None)
-}
-
-pub(crate) fn find_if_in_scope(
-    dominance: &RegionDominanceView<'_>,
-    head: NodeIndex,
-    scope: &HashSet<RegionId>,
-) -> Option<IfSchema> {
-    find_if_with_scope(dominance, head, Some(scope))
 }
 
 fn find_if_with_scope(
@@ -154,7 +146,11 @@ fn find_if_with_scope(
     })
 }
 
-pub(crate) fn contract_if(cfg: &mut RegionCfg, if_schema: IfSchema) -> RegionId {
+pub(crate) fn contract_if(
+    cfg: &mut RegionCfg,
+    regions: &mut RegionStore,
+    if_schema: IfSchema,
+) -> RegionId {
     let head_node = cfg
         .node_for_key(if_schema.head)
         .expect("missing node for if_node");
@@ -187,7 +183,7 @@ pub(crate) fn contract_if(cfg: &mut RegionCfg, if_schema: IfSchema) -> RegionId 
     }
 
     let if_region: Region = if_schema.into();
-    let (if_region_id, if_node) = cfg.add_region(if_region);
+    let (if_region_id, if_node) = cfg.add_region(regions, if_region);
     cfg.redirect_edges(head_node, if_node, Direction::Incoming);
     cfg.graph_mut()
         .add_edge(if_node, join_node, EdgeLabel::Unconditional);

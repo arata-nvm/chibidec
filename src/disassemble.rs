@@ -79,6 +79,8 @@ pub enum InstructionKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConditionKind {
     NonZero,
+    NotEqual,
+    Greater,
     GreaterOrEqual,
     LessOrEqual,
 }
@@ -204,6 +206,14 @@ impl InstructionKind {
                 };
                 match detail.cc() {
                     Arm64CC::ARM64_CC_INVALID => Ok(Self::UnconditionalBranch { target }),
+                    Arm64CC::ARM64_CC_NE => Ok(Self::ConditionalBranch {
+                        target,
+                        kind: ConditionKind::NotEqual,
+                    }),
+                    Arm64CC::ARM64_CC_GT => Ok(Self::ConditionalBranch {
+                        target,
+                        kind: ConditionKind::Greater,
+                    }),
                     Arm64CC::ARM64_CC_GE => Ok(Self::ConditionalBranch {
                         target,
                         kind: ConditionKind::GreaterOrEqual,

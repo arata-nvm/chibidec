@@ -96,6 +96,14 @@ impl Condition {
                 let operands = split_operands(term_insn.op_str());
                 Some(Self::new("!=", operands.first()?.clone(), "0"))
             }
+            ConditionKind::NotEqual => {
+                let (lhs, rhs) = comparison_operands(block)?;
+                Some(Self::new("!=", lhs, rhs))
+            }
+            ConditionKind::Greater => {
+                let (lhs, rhs) = comparison_operands(block)?;
+                Some(Self::new(">", lhs, rhs))
+            }
             ConditionKind::GreaterOrEqual => {
                 let (lhs, rhs) = comparison_operands(block)?;
                 Some(Self::new(">=", lhs, rhs))

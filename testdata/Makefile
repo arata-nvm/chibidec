@@ -1,4 +1,4 @@
-TARGETS = helloworld if-then-else for if-then while do-while
+TARGETS = helloworld if-then-else for if-then while do-while fizzbuzz break-continue for-nested-break
 CFLAGS = -O0
 
 .PHONY: all

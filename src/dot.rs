@@ -7,7 +7,7 @@ use petgraph::{
 
 use crate::{
     cfg_recovery::cfg::{Block, BlockId, EdgeLabel},
-    cfg_structuring::region::{Region, RegionId},
+    cfg_structuring::region::{RegionId, RegionStore},
 };
 
 pub(crate) fn export_cfg_to_dot(
@@ -43,7 +43,7 @@ pub(crate) fn export_cfg_to_dot(
 }
 
 pub(crate) fn export_region_cfg_to_dot(
-    regions: &Arena<Region>,
+    regions: &RegionStore,
     graph: &StableGraph<RegionId, EdgeLabel>,
 ) -> String {
     let get_edge_attributes = |_, edge: EdgeReference<'_, EdgeLabel>| match edge.weight().color() {

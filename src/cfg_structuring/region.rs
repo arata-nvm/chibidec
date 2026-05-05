@@ -39,8 +39,32 @@ pub enum Region {
 }
 
 #[derive(Debug, Clone)]
-pub struct RegionCfg {
+pub struct RegionStore {
     regions: Arena<Region>,
+}
+
+impl RegionStore {
+    pub(crate) fn new() -> Self {
+        Self {
+            regions: Arena::new(),
+        }
+    }
+
+    pub(crate) fn alloc(&mut self, region: Region) -> RegionId {
+        self.regions.alloc(region)
+    }
+
+    pub(crate) fn get(&self, region_id: RegionId) -> Option<&Region> {
+        self.regions.get(region_id)
+    }
+
+    pub fn get_mut(&mut self, region_id: RegionId) -> Option<&mut Region> {
+        self.regions.get_mut(region_id)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RegionCfg {
     inner: IndexedGraph<RegionId, EdgeLabel>,
     vexit: NodeIndex,
 }
@@ -63,26 +87,33 @@ impl IndexedGraphViewMut for RegionCfg {
 impl RegionCfg {
     pub(crate) fn with_capacity(nodes: usize, edges: usize) -> Self {
         Self {
-            regions: Arena::new(),
             inner: IndexedGraph::with_capacity(nodes, edges),
             vexit: NodeIndex::new(usize::MAX),
         }
     }
 
-    pub(crate) fn add_region(&mut self, region: Region) -> (RegionId, NodeIndex) {
-        let region_id = self.regions.alloc(region);
+    pub(crate) fn add_region(
+        &mut self,
+        regions: &mut RegionStore,
+        region: Region,
+    ) -> (RegionId, NodeIndex) {
+        let region_id = regions.alloc(region);
         let node = self.inner.add_node(region_id);
         (region_id, node)
     }
 
+    pub(crate) fn add_existing_region(&mut self, region_id: RegionId) -> NodeIndex {
+        self.inner.add_node(region_id)
+    }
+
     // 出口から仮想的な出口ノードへのエッジを追加し、単一の出口を持つようにする
-    pub(crate) fn add_vexit(&mut self) -> Result<NodeIndex> {
+    pub(crate) fn add_vexit(&mut self, regions: &mut RegionStore) -> Result<NodeIndex> {
         let exit_nodes: Vec<_> = self.graph().externals(Direction::Outgoing).collect();
         if exit_nodes.is_empty() {
             bail!("cfg has no exit nodes");
         }
 
-        let (_, vexit) = self.add_region(Region::VirtualExit);
+        let (_, vexit) = self.add_region(regions, Region::VirtualExit);
         self.vexit = vexit;
 
         for exit_node in exit_nodes {
@@ -177,12 +208,8 @@ impl RegionCfg {
         self.graph_mut().remove_edge(edge)
     }
 
-    pub fn dot(&self) -> String {
-        export_region_cfg_to_dot(&self.regions, self.graph())
-    }
-
-    pub(crate) fn region(&self, region_id: RegionId) -> Option<&Region> {
-        self.regions.get(region_id)
+    pub fn dot(&self, regions: &RegionStore) -> String {
+        export_region_cfg_to_dot(regions, self.graph())
     }
 }
 

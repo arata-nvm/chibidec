@@ -8,20 +8,25 @@ use petgraph::{
 
 use crate::{
     cfg_recovery::cfg::{Condition, EdgeLabel, TailKind},
-    cfg_structuring::region::{Region, RegionCfg, RegionDominanceView, RegionId},
+    cfg_structuring::{
+        VirtualizedEdge,
+        region::{Region, RegionCfg, RegionDominanceView, RegionId, RegionStore},
+    },
     graph::{IndexedGraphView, IndexedGraphViewMut},
 };
 
 pub fn contract_cyclic_region(
     cfg: &mut RegionCfg,
+    regions: &mut RegionStore,
     structured_loop: &StructuredLoop,
     body: RegionId,
 ) -> RegionId {
-    contract_loop(cfg, structured_loop, body)
+    contract_loop(cfg, regions, structured_loop, body)
 }
 
 fn contract_loop(
     cfg: &mut RegionCfg,
+    regions: &mut RegionStore,
     structured_loop: &StructuredLoop,
     body_region: RegionId,
 ) -> RegionId {
@@ -30,24 +35,28 @@ fn contract_loop(
         meta: structured_loop.clone(),
         body: body_region,
     };
-    let (loop_region, loop_node) = cfg.add_region(loop_);
+    let (loop_region, loop_node) = cfg.add_region(regions, loop_);
 
-    let body_node = cfg
-        .node_for_key(body_region)
-        .expect("loop body region should have node");
-    cfg.redirect_edges(body_node, loop_node, Direction::Incoming);
+    let body_nodes: HashSet<_> = structured_loop
+        .body
+        .iter()
+        .filter_map(|region| cfg.node_for_key(*region))
+        .collect();
+    let entry_node = cfg
+        .node_for_key(structured_loop.entry)
+        .expect("loop entry region should have node");
+    cfg.redirect_edges_except(entry_node, loop_node, &body_nodes, Direction::Incoming);
 
     if let Some((exit_node, edge_label)) = structured_loop.loop_exit.exit_target_and_label() {
-        while let Some(edge) = cfg.graph().find_edge(body_node, exit_node) {
-            cfg.graph_mut().remove_edge(edge);
-        }
         if cfg.graph().find_edge(loop_node, exit_node).is_none() {
             cfg.graph_mut().add_edge(loop_node, exit_node, edge_label);
         }
     }
 
-    cfg.remove_node_by_index(body_node)
-        .expect("loop body node should exist");
+    for node in body_nodes {
+        cfg.remove_node_by_index(node)
+            .expect("loop body node should exist");
+    }
 
     loop_region
 }
@@ -55,7 +64,7 @@ fn contract_loop(
 pub fn find_loop(
     cfg: &mut RegionCfg,
     raw_loop: &mut RawLoop,
-) -> (StructuredLoop, Vec<(RegionId, RegionId, EdgeLabel)>) {
+) -> (StructuredLoop, Vec<VirtualizedEdge>) {
     let (single_entry, mut tail_edges) = ensure_single_entry(cfg, raw_loop);
     let (loop_exit, body) = {
         let dominance = cfg
@@ -283,11 +292,15 @@ fn extract_condition(
 fn ensure_single_entry(
     cfg: &mut RegionCfg,
     raw_loop: &mut RawLoop,
-) -> (NodeIndex, Vec<(RegionId, RegionId, EdgeLabel)>) {
+) -> (NodeIndex, Vec<VirtualizedEdge>) {
     let entry = raw_loop.most_likely_entry(cfg);
     let mut virtualized_edges = Vec::new();
     for edge in raw_loop.edges_to_virtualize(cfg, entry) {
         let (source, target) = cfg.graph().edge_endpoints(edge).expect("edge should exist");
+        let render_tail = matches!(
+            cfg.graph().edge_weight(edge).expect("edge should exist"),
+            EdgeLabel::Unconditional
+        );
         cfg.graph_mut()
             .remove_edge(edge)
             .expect("edge should be removable");
@@ -302,7 +315,13 @@ fn ensure_single_entry(
                 .key_for_node(target)
                 .expect("target node should have region id"),
         });
-        virtualized_edges.push((source_region, target_region, new_label));
+        if render_tail {
+            virtualized_edges.push(VirtualizedEdge {
+                source: source_region,
+                target: target_region,
+                label: new_label,
+            });
+        }
     }
     (entry, virtualized_edges)
 }
@@ -451,7 +470,7 @@ fn virtualize_loop_tails(
     raw_loop: &mut RawLoop,
     loop_exit: &LoopExit,
     body: &HashSet<RegionId>,
-) -> Vec<(RegionId, RegionId, EdgeLabel)> {
+) -> Vec<VirtualizedEdge> {
     let Some((exit_node, exit_edge)) = loop_exit.exit() else {
         return vec![];
     };
@@ -480,14 +499,28 @@ fn virtualize_loop_tails(
                     target: target_region,
                 })
             };
-            changed.push((node, edge.target(), *region, target_region, label));
+            let render_tail = matches!(edge.weight(), EdgeLabel::Unconditional);
+            changed.push((
+                node,
+                edge.target(),
+                *region,
+                target_region,
+                label,
+                render_tail,
+            ));
         }
     }
-    for (source, target, source_region, target_region, label) in changed {
+    for (source, target, source_region, target_region, label, render_tail) in changed {
         while let Some(edge) = cfg.graph().find_edge(source, target) {
             cfg.graph_mut().remove_edge(edge);
         }
-        virtualized_edges.push((source_region, target_region, label))
+        if render_tail {
+            virtualized_edges.push(VirtualizedEdge {
+                source: source_region,
+                target: target_region,
+                label,
+            })
+        }
     }
 
     virtualized_edges

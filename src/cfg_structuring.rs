@@ -5,31 +5,47 @@ pub mod region;
 mod scope;
 pub mod seq;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 use petgraph::{
+    Direction,
     graph::NodeIndex,
     visit::{DfsPostOrder, EdgeRef, IntoEdgeReferences},
 };
 
 use crate::{
-    cfg_recovery::cfg::Cfg,
+    cfg_recovery::cfg::{Cfg, EdgeLabel},
     cfg_structuring::{
         cycle::{RawLoop, contract_cyclic_region, find_loop, find_smallest_loop},
-        if_then::{IfSchema, contract_if, find_if, find_if_in_scope},
-        region::{Region, RegionCfg},
-        seq::{contract_seq, find_seq, find_seq_in_scope},
+        if_then::{IfSchema, contract_if, find_if},
+        region::{Region, RegionCfg, RegionId, RegionStore},
+        seq::{contract_seq, find_seq},
     },
     graph::{IndexedGraphView, IndexedGraphViewMut},
 };
 
-pub fn structure_cfg(cfg: &Cfg) -> Result<RegionCfg> {
-    let mut region_cfg = build_region_cfg(cfg).context("failed to create region cfg")?;
+#[derive(Debug, Clone)]
+pub struct StructuredCfg {
+    pub cfg: RegionCfg,
+    pub regions: RegionStore,
+    pub virtualized_edges: Vec<VirtualizedEdge>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VirtualizedEdge {
+    pub source: RegionId,
+    pub target: RegionId,
+    pub label: EdgeLabel,
+}
+
+pub fn structure_cfg(cfg: &Cfg) -> Result<StructuredCfg> {
+    let (mut region_cfg, mut regions) =
+        build_region_cfg(cfg).context("failed to create region cfg")?;
 
     let mut count = 0;
+    let mut next_loop_index = 0;
     let mut virtualized_edges = Vec::new();
-    let mut strucutured_loops = Vec::new();
     while region_cfg.graph().node_count() > 2 {
         let entry = region_cfg.entry().context("failed to find entry region")?;
 
@@ -37,32 +53,46 @@ pub fn structure_cfg(cfg: &Cfg) -> Result<RegionCfg> {
         let mut order = DfsPostOrder::new(region_cfg.graph(), entry);
         while let Some(head) = order.next(region_cfg.graph()) {
             count += 1;
-            std::fs::write(format!("tmp/region_cfg_{}.dot", count), region_cfg.dot())
-                .expect("failed to write region cfg dot file");
+            std::fs::write(
+                format!("tmp/region_cfg_{}.dot", count),
+                region_cfg.dot(&regions),
+            )
+            .expect("failed to write region cfg dot file");
 
-            match find_reduction(&region_cfg, head, strucutured_loops.len())? {
+            match find_reduction(&region_cfg, head, next_loop_index)? {
                 Some(Reduction::Cycle {
-                    target,
+                    target: _,
                     mut raw_loop,
                 }) => {
-                    eprintln!("cycle discovered: {}", target.index());
                     let (structured_loop, tail_edges) = find_loop(&mut region_cfg, &mut raw_loop);
-                    strucutured_loops.push(structured_loop.clone());
+                    next_loop_index += 1;
                     virtualized_edges.extend(tail_edges);
 
-                    let body_region =
-                        reduce_loop_body(&mut region_cfg, structured_loop.body.clone())?;
-                    contract_cyclic_region(&mut region_cfg, &structured_loop, body_region);
+                    let mut body_cfg =
+                        create_loop_body_cfg(&region_cfg, &structured_loop, &mut regions)?;
+                    let body_region = reduce_loop_body(
+                        &mut body_cfg,
+                        &mut regions,
+                        &mut virtualized_edges,
+                        &mut next_loop_index,
+                        structured_loop.index,
+                    )?;
+                    contract_cyclic_region(
+                        &mut region_cfg,
+                        &mut regions,
+                        &structured_loop,
+                        body_region,
+                    );
                     progress = true;
                     break;
                 }
                 Some(Reduction::Seq(seq)) => {
-                    contract_seq(&mut region_cfg, &seq);
+                    contract_seq(&mut region_cfg, &mut regions, &seq);
                     progress = true;
                     break;
                 }
                 Some(Reduction::If(if_schema)) => {
-                    contract_if(&mut region_cfg, if_schema);
+                    contract_if(&mut region_cfg, &mut regions, if_schema);
                     progress = true;
                     break;
                 }
@@ -75,7 +105,11 @@ pub fn structure_cfg(cfg: &Cfg) -> Result<RegionCfg> {
         }
     }
 
-    Ok(region_cfg)
+    Ok(StructuredCfg {
+        cfg: region_cfg,
+        regions,
+        virtualized_edges,
+    })
 }
 
 enum Reduction {
@@ -112,7 +146,8 @@ fn find_reduction(
     }
 }
 
-fn build_region_cfg(cfg: &Cfg) -> Result<RegionCfg> {
+fn build_region_cfg(cfg: &Cfg) -> Result<(RegionCfg, RegionStore)> {
+    let mut regions = RegionStore::new();
     let mut region_cfg =
         RegionCfg::with_capacity(cfg.graph().node_count() + 1, cfg.graph().edge_count() + 1);
 
@@ -122,7 +157,7 @@ fn build_region_cfg(cfg: &Cfg) -> Result<RegionCfg> {
         let block = cfg
             .key_for_node(cfg_node)
             .expect("function cfg node without block id");
-        let (_, region_node) = region_cfg.add_region(Region::Leaf(block));
+        let (_, region_node) = region_cfg.add_region(&mut regions, Region::Leaf(block));
         node_map.insert(cfg_node, region_node);
     }
     for cfg_edge in cfg.graph().edge_references() {
@@ -137,37 +172,55 @@ fn build_region_cfg(cfg: &Cfg) -> Result<RegionCfg> {
             .add_edge(*source, *target, cfg_edge.weight().clone());
     }
 
-    region_cfg.add_vexit().context("failed to add vexit")?;
+    region_cfg
+        .add_vexit(&mut regions)
+        .context("failed to add vexit")?;
 
-    Ok(region_cfg)
+    Ok((region_cfg, regions))
 }
 
 fn reduce_loop_body(
     cfg: &mut RegionCfg,
-    mut scope: HashSet<region::RegionId>,
-) -> Result<region::RegionId> {
-    while scope.len() > 1 {
-        let mut body_nodes: Vec<_> = scope
-            .iter()
-            .map(|region| {
-                cfg.node_for_key(*region)
-                    .context("loop body region should have node")
-            })
-            .collect::<Result<_>>()?;
-        body_nodes.sort_by_key(|node| node.index());
-
+    regions: &mut RegionStore,
+    virtualized_edges: &mut Vec<VirtualizedEdge>,
+    next_loop_index: &mut usize,
+    loop_index: usize,
+) -> Result<RegionId> {
+    while cfg.graph().node_count() > 2 {
         let mut progress = false;
-        for head in body_nodes {
-            if let Some(seq) = find_seq_in_scope(cfg, head, &scope) {
-                let old_regions: Vec<_> = seq
-                    .iter()
-                    .map(|node| cfg.key_for_node(*node).expect("node should have region"))
-                    .collect();
-                let new_region = contract_seq(cfg, &seq);
-                for region in old_regions {
-                    scope.remove(&region);
+        let entry = cfg.entry().context("failed to find loop body entry")?;
+        let mut order = DfsPostOrder::new(cfg.graph(), entry);
+        while let Some(head) = order.next(cfg.graph()) {
+            let nested_loop = {
+                let dominance = cfg
+                    .compute_dominance()
+                    .context("failed to compute loop body dominance")?;
+                if dominance.has_backedge(head) {
+                    Some(find_smallest_loop(&dominance, head, *next_loop_index))
+                } else {
+                    None
                 }
-                scope.insert(new_region);
+            };
+            if let Some(mut raw_loop) = nested_loop {
+                let (structured_loop, tail_edges) = find_loop(cfg, &mut raw_loop);
+                *next_loop_index += 1;
+                virtualized_edges.extend(tail_edges);
+
+                let mut body_cfg = create_loop_body_cfg(cfg, &structured_loop, regions)?;
+                let body_region = reduce_loop_body(
+                    &mut body_cfg,
+                    regions,
+                    virtualized_edges,
+                    next_loop_index,
+                    structured_loop.index,
+                )?;
+                contract_cyclic_region(cfg, regions, &structured_loop, body_region);
+                progress = true;
+                break;
+            }
+
+            if let Some(seq) = find_seq(cfg, head) {
+                contract_seq(cfg, regions, &seq);
                 progress = true;
                 break;
             }
@@ -175,38 +228,86 @@ fn reduce_loop_body(
             let if_schema = {
                 let dominance = cfg
                     .compute_dominance()
-                    .context("failed to compute dominance")?;
-                find_if_in_scope(&dominance, head, &scope)
+                    .context("failed to compute loop body dominance")?;
+                find_if(&dominance, head)
             };
             if let Some(if_schema) = if_schema {
-                let old_regions = if_regions_removed_from_scope(&if_schema);
-                let new_region = contract_if(cfg, if_schema);
-                for region in old_regions {
-                    scope.remove(&region);
-                }
-                scope.insert(new_region);
+                contract_if(cfg, regions, if_schema);
                 progress = true;
                 break;
             }
         }
 
         if !progress {
-            bail!("failed to find any acyclic pattern in loop");
+            bail!("failed to find any acyclic pattern in loop body {loop_index}");
         }
     }
 
-    scope
-        .into_iter()
-        .next()
-        .context("loop body should contain at least one region")
+    cfg.graph()
+        .node_indices()
+        .find(|node| *node != cfg.vexit())
+        .and_then(|node| cfg.key_for_node(node))
+        .context("loop body should contain exactly one region")
 }
 
-fn if_regions_removed_from_scope(if_schema: &IfSchema) -> Vec<region::RegionId> {
-    let mut regions = Vec::new();
-    regions.push(if_schema.head);
-    regions.extend(if_schema.then_body.iter().copied());
-    if let Some(else_body) = &if_schema.else_body {
-        regions.extend(else_body.iter().copied());
+fn create_loop_body_cfg(
+    main_cfg: &RegionCfg,
+    structured_loop: &cycle::StructuredLoop,
+    regions: &mut RegionStore,
+) -> Result<RegionCfg> {
+    let mut body_cfg = RegionCfg::with_capacity(
+        structured_loop.body.len() + 1,
+        main_cfg.graph().edge_count() + 1,
+    );
+
+    for node in main_cfg.graph().node_indices() {
+        let Some(region) = main_cfg.key_for_node(node) else {
+            continue;
+        };
+        if structured_loop.body.contains(&region) {
+            body_cfg.add_existing_region(region);
+        }
     }
-    regions
+
+    for edge in main_cfg.graph().edge_references() {
+        let Some(source_region) = main_cfg.key_for_node(edge.source()) else {
+            continue;
+        };
+        let Some(target_region) = main_cfg.key_for_node(edge.target()) else {
+            continue;
+        };
+        if !structured_loop.body.contains(&source_region)
+            || !structured_loop.body.contains(&target_region)
+        {
+            continue;
+        }
+        let source = body_cfg
+            .node_for_key(source_region)
+            .context("body source region should have node")?;
+        let target = body_cfg
+            .node_for_key(target_region)
+            .context("body target region should have node")?;
+        body_cfg
+            .graph_mut()
+            .add_edge(source, target, edge.weight().clone());
+    }
+
+    body_cfg
+        .add_vexit(regions)
+        .context("failed to add loop body vexit")?;
+
+    let entry = body_cfg
+        .node_for_key(structured_loop.entry)
+        .or_else(|| body_cfg.graph().externals(Direction::Incoming).next())
+        .context("loop body cfg should have an entry")?;
+    if body_cfg
+        .graph()
+        .neighbors_directed(entry, Direction::Incoming)
+        .next()
+        .is_some()
+    {
+        bail!("loop body entry still has incoming edges");
+    }
+
+    Ok(body_cfg)
 }
