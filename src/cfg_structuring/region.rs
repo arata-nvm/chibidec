@@ -101,8 +101,12 @@ impl RegionCfg {
         self.vexit
     }
 
-    pub fn compute_dominance(&self) -> Option<RegionDominance> {
-        Some(RegionDominance::compute(self, self.entry()?, self.vexit()))
+    pub fn compute_dominance(&self) -> Option<RegionDominanceView<'_>> {
+        Some(RegionDominanceView::compute(
+            self,
+            self.entry()?,
+            self.vexit(),
+        ))
     }
 
     pub(crate) fn remove_node_by_index(&mut self, node: NodeIndex) -> Result<()> {
@@ -178,17 +182,27 @@ impl RegionCfg {
     }
 }
 
-pub struct RegionDominance {
+pub struct RegionDominanceView<'cfg> {
+    cfg: &'cfg RegionCfg,
     dom: Dominators<NodeIndex>,
     pdom: Dominators<NodeIndex>,
     vexit: NodeIndex,
 }
 
-impl RegionDominance {
-    fn compute(cfg: &RegionCfg, entry: NodeIndex, vexit: NodeIndex) -> Self {
+impl<'cfg> RegionDominanceView<'cfg> {
+    fn compute(cfg: &'cfg RegionCfg, entry: NodeIndex, vexit: NodeIndex) -> Self {
         let dom = dominators::simple_fast(cfg.graph(), entry);
         let pdom = dominators::simple_fast(Reversed(cfg.graph()), vexit);
-        Self { dom, pdom, vexit }
+        Self {
+            cfg,
+            dom,
+            pdom,
+            vexit,
+        }
+    }
+
+    pub(crate) fn cfg(&self) -> &'cfg RegionCfg {
+        self.cfg
     }
 
     pub fn dominates(&self, a: NodeIndex, b: NodeIndex) -> bool {
@@ -209,30 +223,24 @@ impl RegionDominance {
         self.pdom.immediate_dominator(node)
     }
 
-    pub fn backedge_sources(
-        &self,
-        cfg: &RegionCfg,
-        node: NodeIndex,
-    ) -> impl Iterator<Item = NodeIndex> {
-        cfg.graph()
+    pub fn backedge_sources(&self, node: NodeIndex) -> impl Iterator<Item = NodeIndex> + '_ {
+        self.cfg
+            .graph()
             .neighbors_directed(node, Direction::Incoming)
             .filter(move |&pred| self.dominates(node, pred))
     }
 
-    pub fn backedge_targets(
-        &self,
-        cfg: &RegionCfg,
-        node: NodeIndex,
-    ) -> impl Iterator<Item = NodeIndex> {
-        cfg.graph()
+    pub fn backedge_targets(&self, node: NodeIndex) -> impl Iterator<Item = NodeIndex> + '_ {
+        self.cfg
+            .graph()
             .neighbors_directed(node, Direction::Outgoing)
             .filter(move |&succ| self.dominates(succ, node))
     }
 
-    pub fn has_backedge(&self, cfg: &RegionCfg, node: NodeIndex) -> bool {
+    pub fn has_backedge(&self, node: NodeIndex) -> bool {
         if node == self.vexit {
             return false;
         }
-        self.backedge_targets(cfg, node).next().is_some()
+        self.backedge_targets(node).next().is_some()
     }
 }

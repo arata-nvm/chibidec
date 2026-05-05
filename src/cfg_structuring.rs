@@ -15,10 +15,10 @@ use petgraph::{
 use crate::{
     cfg_recovery::cfg::Cfg,
     cfg_structuring::{
-        cycle::{contract_cyclic_region, find_loop, find_smallest_loop},
-        if_then::{IfSchema, contract_if, find_if_in_scope, match_if},
-        region::{Region, RegionCfg, RegionDominance},
-        seq::{contract_seq, find_seq_in_scope, match_seq},
+        cycle::{RawLoop, contract_cyclic_region, find_loop, find_smallest_loop},
+        if_then::{IfSchema, contract_if, find_if, find_if_in_scope},
+        region::{Region, RegionCfg},
+        seq::{contract_seq, find_seq, find_seq_in_scope},
     },
     graph::{IndexedGraphView, IndexedGraphViewMut},
 };
@@ -31,9 +31,6 @@ pub fn structure_cfg(cfg: &Cfg) -> Result<RegionCfg> {
     let mut strucutured_loops = Vec::new();
     while region_cfg.graph().node_count() > 2 {
         let entry = region_cfg.entry().context("failed to find entry region")?;
-        let dominance = region_cfg
-            .compute_dominance()
-            .context("failed to compute region dominance")?;
 
         let mut progress = false;
         let mut order = DfsPostOrder::new(region_cfg.graph(), entry);
@@ -41,23 +38,34 @@ pub fn structure_cfg(cfg: &Cfg) -> Result<RegionCfg> {
             count += 1;
             std::fs::write(format!("tmp/region_cfg_{}.dot", count), region_cfg.dot())
                 .expect("failed to write region cfg dot file");
-            if dominance.has_backedge(&region_cfg, head) {
-                eprintln!("cycle discovered: {}", head.index());
-                let mut raw_loop =
-                    find_smallest_loop(&region_cfg, &dominance, head, strucutured_loops.len());
-                let (structured_loop, tail_edges) = find_loop(&mut region_cfg, &mut raw_loop);
-                strucutured_loops.push(structured_loop.clone());
-                virtualized_edges.extend(tail_edges);
 
-                let body_region = reduce_loop_body(&mut region_cfg, structured_loop.body.clone())?;
-                contract_cyclic_region(&mut region_cfg, &structured_loop, body_region);
-                progress = true;
-                break;
-            } else {
-                progress = match_acyclic(&mut region_cfg, &dominance, head);
-                if progress {
+            match find_reduction(&region_cfg, head, strucutured_loops.len())? {
+                Some(Reduction::Cycle {
+                    target,
+                    mut raw_loop,
+                }) => {
+                    eprintln!("cycle discovered: {}", target.index());
+                    let (structured_loop, tail_edges) = find_loop(&mut region_cfg, &mut raw_loop);
+                    strucutured_loops.push(structured_loop.clone());
+                    virtualized_edges.extend(tail_edges);
+
+                    let body_region =
+                        reduce_loop_body(&mut region_cfg, structured_loop.body.clone())?;
+                    contract_cyclic_region(&mut region_cfg, &structured_loop, body_region);
+                    progress = true;
                     break;
                 }
+                Some(Reduction::Seq(seq)) => {
+                    contract_seq(&mut region_cfg, &seq);
+                    progress = true;
+                    break;
+                }
+                Some(Reduction::If(if_schema)) => {
+                    contract_if(&mut region_cfg, if_schema);
+                    progress = true;
+                    break;
+                }
+                None => {}
             }
         }
 
@@ -67,6 +75,40 @@ pub fn structure_cfg(cfg: &Cfg) -> Result<RegionCfg> {
     }
 
     Ok(region_cfg)
+}
+
+enum Reduction {
+    Cycle {
+        target: NodeIndex,
+        raw_loop: RawLoop,
+    },
+    Seq(Vec<NodeIndex>),
+    If(IfSchema),
+}
+
+fn find_reduction(
+    cfg: &RegionCfg,
+    head: NodeIndex,
+    loop_index: usize,
+) -> Result<Option<Reduction>> {
+    {
+        let dominance = cfg
+            .compute_dominance()
+            .context("failed to compute region dominance")?;
+        if dominance.has_backedge(head) {
+            let raw_loop = find_smallest_loop(&dominance, head, loop_index);
+            return Ok(Some(Reduction::Cycle {
+                target: head,
+                raw_loop,
+            }));
+        }
+
+        if let Some(seq) = find_seq(cfg, head) {
+            return Ok(Some(Reduction::Seq(seq)));
+        }
+
+        Ok(find_if(&dominance, head).map(Reduction::If))
+    }
 }
 
 fn build_region_cfg(cfg: &Cfg) -> Result<RegionCfg> {
@@ -99,18 +141,11 @@ fn build_region_cfg(cfg: &Cfg) -> Result<RegionCfg> {
     Ok(region_cfg)
 }
 
-fn match_acyclic(cfg: &mut RegionCfg, dominance: &RegionDominance, head: NodeIndex) -> bool {
-    match_seq(cfg, head) || match_if(cfg, dominance, head)
-}
-
 fn reduce_loop_body(
     cfg: &mut RegionCfg,
     mut scope: HashSet<region::RegionId>,
 ) -> Result<region::RegionId> {
     while scope.len() > 1 {
-        let dominance = cfg
-            .compute_dominance()
-            .context("failed to compute dominance")?;
         let mut body_nodes: Vec<_> = scope
             .iter()
             .map(|region| {
@@ -136,7 +171,13 @@ fn reduce_loop_body(
                 break;
             }
 
-            if let Some(if_schema) = find_if_in_scope(cfg, &dominance, head, &scope) {
+            let if_schema = {
+                let dominance = cfg
+                    .compute_dominance()
+                    .context("failed to compute dominance")?;
+                find_if_in_scope(&dominance, head, &scope)
+            };
+            if let Some(if_schema) = if_schema {
                 let old_regions = if_regions_removed_from_scope(&if_schema);
                 let new_region = contract_if(cfg, if_schema);
                 for region in old_regions {

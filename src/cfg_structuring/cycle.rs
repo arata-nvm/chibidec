@@ -8,7 +8,7 @@ use petgraph::{
 
 use crate::{
     cfg_recovery::cfg::{Condition, EdgeLabel, TailKind},
-    cfg_structuring::region::{Region, RegionCfg, RegionDominance, RegionId},
+    cfg_structuring::region::{Region, RegionCfg, RegionDominanceView, RegionId},
     graph::{IndexedGraphView, IndexedGraphViewMut},
 };
 
@@ -57,18 +57,21 @@ pub fn find_loop(
     raw_loop: &mut RawLoop,
 ) -> (StructuredLoop, Vec<(RegionId, RegionId, EdgeLabel)>) {
     let (single_entry, mut tail_edges) = ensure_single_entry(cfg, raw_loop);
-    let dominance = cfg
-        .compute_dominance()
-        .expect("failed to compute region dominance");
-    let loop_exit =
-        select_single_exit(cfg, &dominance, raw_loop).expect("at least one exit should be found");
-    let body = match loop_exit.exit_node() {
-        Some(exit_node) => build_loop_body(cfg, &dominance, single_entry, exit_node),
-        None => raw_loop
-            .nodes
-            .iter()
-            .map(|node| cfg.key_for_node(*node).expect("node should have region"))
-            .collect(),
+    let (loop_exit, body) = {
+        let dominance = cfg
+            .compute_dominance()
+            .expect("failed to compute region dominance");
+        let loop_exit =
+            select_single_exit(&dominance, raw_loop).expect("at least one exit should be found");
+        let body = match loop_exit.exit_node() {
+            Some(exit_node) => build_loop_body(&dominance, single_entry, exit_node),
+            None => raw_loop
+                .nodes
+                .iter()
+                .map(|node| cfg.key_for_node(*node).expect("node should have region"))
+                .collect(),
+        };
+        (loop_exit, body)
     };
 
     let virtualized_tail_edges = virtualize_loop_tails(cfg, raw_loop, &loop_exit, &body);
@@ -79,13 +82,13 @@ pub fn find_loop(
 }
 
 pub fn find_smallest_loop(
-    cfg: &RegionCfg,
-    dominance: &RegionDominance,
+    dominance: &RegionDominanceView<'_>,
     target: NodeIndex,
     index: usize,
 ) -> RawLoop {
+    let cfg = dominance.cfg();
     let mut loops = Vec::new();
-    for head in dominance.backedge_targets(cfg, target) {
+    for head in dominance.backedge_targets(target) {
         let loop_nodes = if target == head {
             HashSet::from([target])
         } else {
@@ -329,11 +332,8 @@ impl LoopExit {
     }
 }
 
-fn select_single_exit(
-    cfg: &RegionCfg,
-    dominance: &RegionDominance,
-    raw_loop: &RawLoop,
-) -> Option<LoopExit> {
+fn select_single_exit(dominance: &RegionDominanceView<'_>, raw_loop: &RawLoop) -> Option<LoopExit> {
+    let cfg = dominance.cfg();
     let preferred_succ = dominance.immediate_post_dominator(raw_loop.head);
     let exit_edges = raw_loop.exit_edges.clone();
 
@@ -360,7 +360,7 @@ fn select_single_exit(
     }
 
     // do-while: 戻り辺のソースからの出辺がある
-    let srcs: HashSet<_> = dominance.backedge_sources(cfg, raw_loop.head).collect();
+    let srcs: HashSet<_> = dominance.backedge_sources(raw_loop.head).collect();
     let do_while_edges: HashSet<_> = raw_loop
         .exit_edges
         .iter()
@@ -427,11 +427,11 @@ fn select_single_exit(
 }
 
 fn build_loop_body(
-    cfg: &RegionCfg,
-    dominance: &RegionDominance,
+    dominance: &RegionDominanceView<'_>,
     head: NodeIndex,
     succ: NodeIndex,
 ) -> HashSet<RegionId> {
+    let cfg = dominance.cfg();
     cfg.graph()
         .node_indices()
         .filter(|&node| dominance.dominates(head, node))

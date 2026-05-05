@@ -5,21 +5,11 @@ use petgraph::{Direction, graph::NodeIndex};
 use crate::{
     cfg_recovery::cfg::{Condition, EdgeLabel},
     cfg_structuring::{
-        region::{Region, RegionCfg, RegionDominance, RegionId},
+        region::{Region, RegionCfg, RegionDominanceView, RegionId},
         scope::{is_in_scope, scoped_neighbors},
     },
     graph::{IndexedGraphView, IndexedGraphViewMut},
 };
-
-pub(crate) fn match_if(cfg: &mut RegionCfg, dominance: &RegionDominance, head: NodeIndex) -> bool {
-    match find_if(cfg, dominance, head) {
-        Some(if_schema) => {
-            contract_if(cfg, if_schema);
-            true
-        }
-        None => false,
-    }
-}
 
 #[derive(Debug)]
 pub struct IfSchema {
@@ -63,29 +53,24 @@ impl From<IfSchema> for Region {
     }
 }
 
-pub(crate) fn find_if(
-    cfg: &RegionCfg,
-    dominance: &RegionDominance,
-    head: NodeIndex,
-) -> Option<IfSchema> {
-    find_if_with_scope(cfg, dominance, head, None)
+pub(crate) fn find_if(dominance: &RegionDominanceView<'_>, head: NodeIndex) -> Option<IfSchema> {
+    find_if_with_scope(dominance, head, None)
 }
 
 pub(crate) fn find_if_in_scope(
-    cfg: &RegionCfg,
-    dominance: &RegionDominance,
+    dominance: &RegionDominanceView<'_>,
     head: NodeIndex,
     scope: &HashSet<RegionId>,
 ) -> Option<IfSchema> {
-    find_if_with_scope(cfg, dominance, head, Some(scope))
+    find_if_with_scope(dominance, head, Some(scope))
 }
 
 fn find_if_with_scope(
-    cfg: &RegionCfg,
-    dominance: &RegionDominance,
+    dominance: &RegionDominanceView<'_>,
     head: NodeIndex,
     scope: Option<&HashSet<RegionId>>,
 ) -> Option<IfSchema> {
+    let cfg = dominance.cfg();
     if let Some(scope) = scope {
         let head_region = cfg.key_for_node(head)?;
         if !scope.contains(&head_region) {
@@ -221,7 +206,7 @@ pub(crate) fn contract_if(cfg: &mut RegionCfg, if_schema: IfSchema) -> RegionId 
 // headに支配され、かつjoinに後続支配されるノードを探索する
 fn collect_nodes_between(
     cfg: &RegionCfg,
-    dominance: &RegionDominance,
+    dominance: &RegionDominanceView<'_>,
     head: NodeIndex,
     then_entry: NodeIndex,
     join: NodeIndex,

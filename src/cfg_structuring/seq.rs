@@ -12,16 +12,6 @@ use crate::{
 
 use super::Region;
 
-pub(crate) fn match_seq(region_cfg: &mut RegionCfg, head: NodeIndex) -> bool {
-    match find_seq(region_cfg, head) {
-        Some(seq) => {
-            contract_seq(region_cfg, &seq);
-            true
-        }
-        None => false,
-    }
-}
-
 pub(crate) fn find_seq(cfg: &RegionCfg, head: NodeIndex) -> Option<Vec<NodeIndex>> {
     find_seq_with_scope(cfg, head, None)
 }
