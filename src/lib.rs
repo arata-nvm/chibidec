@@ -3,7 +3,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use crate::{
-    binary::Binary, cfg_recovery::recover_cfg, cfg_structuring::structure_cfg,
+    binary::Binary,
+    cfg_recovery::recover_cfg,
+    cfg_structuring::{asm::render_structured_assembly, structure_cfg},
     disassemble::disassemble,
 };
 
@@ -33,6 +35,7 @@ pub fn decompile(binary_path: &Path) -> Result<()> {
 
     let structured_cfg = structure_cfg(&main_cfg).context("failed to structure cfg")?;
     std::fs::write("tmp/structured_cfg.dot", structured_cfg.dot())?;
+    print!("{}", render_structured_assembly(&structured_cfg, &main_cfg));
 
     Ok(())
 }

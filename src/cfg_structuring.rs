@@ -1,3 +1,4 @@
+pub mod asm;
 pub mod cycle;
 pub mod if_then;
 pub mod region;

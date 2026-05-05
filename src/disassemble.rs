@@ -106,6 +106,14 @@ impl Instruction {
         self.addr
     }
 
+    pub fn mnemonic(&self) -> &str {
+        &self.mnemonic
+    }
+
+    pub fn op_str(&self) -> &str {
+        &self.op_str
+    }
+
     fn next_addr(&self) -> u64 {
         self.addr + self.len as u64
     }

@@ -221,7 +221,12 @@ impl StructuredLoop {
                 .and_then(|edge| cfg.graph().edge_weight(edge))
                 .and_then(|label| label.effective_condition())
                 .map(|cond| cond.negate()),
-            LoopKind::While | LoopKind::NatLoop => {
+            LoopKind::While => loop_exit
+                .exit_edge()
+                .and_then(|edge| cfg.graph().edge_weight(edge))
+                .and_then(|label| label.effective_condition())
+                .map(|cond| cond.negate()),
+            LoopKind::NatLoop => {
                 extract_condition(cfg, raw_loop.head, entry, loop_exit.exit_node())
             }
         };

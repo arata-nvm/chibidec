@@ -92,21 +92,57 @@ impl Condition {
     pub fn from_block(block: &Block) -> Option<Self> {
         let term_insn = block.terminator();
         match term_insn.conditional_branch_kind()? {
-            ConditionKind::NonZero => Some(Self::new("!=", "TODO", "0")),
-            ConditionKind::GreaterOrEqual => Some(Self::new(">", "TODO", "TODO")),
-            ConditionKind::LessOrEqual => Some(Self::new("<=", "TODO", "TODO")),
+            ConditionKind::NonZero => {
+                let operands = split_operands(term_insn.op_str());
+                Some(Self::new("!=", operands.first()?.clone(), "0"))
+            }
+            ConditionKind::GreaterOrEqual => {
+                let (lhs, rhs) = comparison_operands(block)?;
+                Some(Self::new(">=", lhs, rhs))
+            }
+            ConditionKind::LessOrEqual => {
+                let (lhs, rhs) = comparison_operands(block)?;
+                Some(Self::new("<=", lhs, rhs))
+            }
         }
     }
 
     pub fn negate(&self) -> Self {
         let negated_op = match self.op.as_str() {
             "!=" => "==",
+            "==" => "!=",
             ">" => "<=",
+            ">=" => "<",
+            "<" => ">=",
             "<=" => ">",
             _ => unimplemented!("unsupported condition operator: {}", self.op),
         };
         Self::new(negated_op, self.lhs.clone(), self.rhs.clone())
     }
+}
+
+fn comparison_operands(block: &Block) -> Option<(String, String)> {
+    let cmp_insn = block
+        .instructions()
+        .iter()
+        .rev()
+        .skip(1)
+        .find(|insn| matches!(insn.mnemonic(), "cmp" | "subs"))?;
+    let operands = split_operands(cmp_insn.op_str());
+
+    match cmp_insn.mnemonic() {
+        "cmp" => Some((operands.first()?.clone(), operands.get(1)?.clone())),
+        "subs" => Some((operands.get(1)?.clone(), operands.get(2)?.clone())),
+        _ => None,
+    }
+}
+
+fn split_operands(op_str: &str) -> Vec<String> {
+    op_str
+        .split(',')
+        .map(|operand| operand.trim().trim_start_matches('#').to_string())
+        .filter(|operand| !operand.is_empty())
+        .collect()
 }
 
 impl fmt::Display for Condition {
@@ -154,7 +190,6 @@ impl EdgeLabel {
 
 #[derive(Debug, Clone)]
 pub struct Cfg {
-    #[allow(dead_code)]
     blocks: Arena<Block>,
     inner: IndexedGraph<BlockId, EdgeLabel>,
     entry: NodeIndex,
@@ -192,6 +227,10 @@ impl Cfg {
 
     pub fn entry(&self) -> NodeIndex {
         self.entry
+    }
+
+    pub fn block(&self, block_id: BlockId) -> Option<&Block> {
+        self.blocks.get(block_id)
     }
 
     pub fn dot(&self) -> String {

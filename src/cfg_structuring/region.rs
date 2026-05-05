@@ -180,6 +180,10 @@ impl RegionCfg {
     pub fn dot(&self) -> String {
         export_region_cfg_to_dot(&self.regions, self.graph())
     }
+
+    pub(crate) fn region(&self, region_id: RegionId) -> Option<&Region> {
+        self.regions.get(region_id)
+    }
 }
 
 pub struct RegionDominanceView<'cfg> {
