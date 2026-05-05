@@ -94,6 +94,7 @@ impl Condition {
         match term_insn.conditional_branch_kind()? {
             ConditionKind::NonZero => Some(Self::new("!=", "TODO", "0")),
             ConditionKind::GreaterOrEqual => Some(Self::new(">", "TODO", "TODO")),
+            ConditionKind::LessOrEqual => Some(Self::new("<=", "TODO", "TODO")),
         }
     }
 
@@ -101,6 +102,7 @@ impl Condition {
         let negated_op = match self.op.as_str() {
             "!=" => "==",
             ">" => "<=",
+            "<=" => ">",
             _ => unimplemented!("unsupported condition operator: {}", self.op),
         };
         Self::new(negated_op, self.lhs.clone(), self.rhs.clone())

@@ -75,10 +75,6 @@ impl RegionCfg {
         (region_id, node)
     }
 
-    pub(crate) fn region_mut(&mut self, id: RegionId) -> Option<&mut Region> {
-        self.regions.get_mut(id)
-    }
-
     // 出口から仮想的な出口ノードへのエッジを追加し、単一の出口を持つようにする
     pub(crate) fn add_vexit(&mut self) -> Result<NodeIndex> {
         let exit_nodes: Vec<_> = self.graph().externals(Direction::Outgoing).collect();
@@ -118,23 +114,6 @@ impl RegionCfg {
 
     pub(crate) fn entry(&self) -> Option<NodeIndex> {
         self.graph().externals(Direction::Incoming).next()
-    }
-
-    pub(crate) fn degree(&self, node: NodeIndex, direction: Direction) -> usize {
-        self.graph().edges_directed(node, direction).count()
-    }
-
-    // nodeのdir方向の隣接ノードが1つだけ存在する場合は、そのノードを返す。それ以外の場合はNoneを返す。
-    pub(crate) fn neighbor_if_one(
-        &self,
-        node: NodeIndex,
-        direction: Direction,
-    ) -> Option<NodeIndex> {
-        let mut neighbors = self.graph().neighbors_directed(node, direction);
-        let (Some(neighbor), None) = (neighbors.next(), neighbors.next()) else {
-            return None;
-        };
-        Some(neighbor)
     }
 
     pub(crate) fn redirect_edges(

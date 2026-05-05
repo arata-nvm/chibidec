@@ -80,6 +80,7 @@ pub enum InstructionKind {
 pub enum ConditionKind {
     NonZero,
     GreaterOrEqual,
+    LessOrEqual,
 }
 
 impl Instruction {
@@ -198,6 +199,10 @@ impl InstructionKind {
                     Arm64CC::ARM64_CC_GE => Ok(Self::ConditionalBranch {
                         target,
                         kind: ConditionKind::GreaterOrEqual,
+                    }),
+                    Arm64CC::ARM64_CC_LE => Ok(Self::ConditionalBranch {
+                        target,
+                        kind: ConditionKind::LessOrEqual,
                     }),
                     _ => bail!(
                         "unsupported condition code for B instruction: {:?}",

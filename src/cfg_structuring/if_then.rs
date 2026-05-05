@@ -4,7 +4,10 @@ use petgraph::{Direction, graph::NodeIndex};
 
 use crate::{
     cfg_recovery::cfg::{Condition, EdgeLabel},
-    cfg_structuring::region::{Region, RegionCfg, RegionDominance, RegionId},
+    cfg_structuring::{
+        region::{Region, RegionCfg, RegionDominance, RegionId},
+        scope::{is_in_scope, scoped_neighbors},
+    },
     graph::{IndexedGraphView, IndexedGraphViewMut},
 };
 
@@ -60,8 +63,37 @@ impl From<IfSchema> for Region {
     }
 }
 
-fn find_if(cfg: &RegionCfg, dominance: &RegionDominance, head: NodeIndex) -> Option<IfSchema> {
-    let mut succs = cfg.graph().neighbors_directed(head, Direction::Outgoing);
+pub(crate) fn find_if(
+    cfg: &RegionCfg,
+    dominance: &RegionDominance,
+    head: NodeIndex,
+) -> Option<IfSchema> {
+    find_if_with_scope(cfg, dominance, head, None)
+}
+
+pub(crate) fn find_if_in_scope(
+    cfg: &RegionCfg,
+    dominance: &RegionDominance,
+    head: NodeIndex,
+    scope: &HashSet<RegionId>,
+) -> Option<IfSchema> {
+    find_if_with_scope(cfg, dominance, head, Some(scope))
+}
+
+fn find_if_with_scope(
+    cfg: &RegionCfg,
+    dominance: &RegionDominance,
+    head: NodeIndex,
+    scope: Option<&HashSet<RegionId>>,
+) -> Option<IfSchema> {
+    if let Some(scope) = scope {
+        let head_region = cfg.key_for_node(head)?;
+        if !scope.contains(&head_region) {
+            return None;
+        }
+    }
+
+    let mut succs = scoped_neighbors(cfg, head, Direction::Outgoing, scope);
     let succ1 = succs.next()?;
     let succ2 = succs.next()?;
     if succs.next().is_some() || succ1 == cfg.vexit() || succ2 == cfg.vexit() {
@@ -87,16 +119,18 @@ fn find_if(cfg: &RegionCfg, dominance: &RegionDominance, head: NodeIndex) -> Opt
         return None;
     }
 
-    let then_nodes = collect_nodes_between(cfg, dominance, head, then_entry, join);
-    if then_nodes.is_empty() || contains_sess_violation(cfg, head, then_entry, &then_nodes, join) {
+    let then_nodes = collect_nodes_between(cfg, dominance, head, then_entry, join, scope);
+    if then_nodes.is_empty()
+        || contains_sess_violation(cfg, head, then_entry, &then_nodes, join, scope)
+    {
         return None;
     }
 
     let else_nodes = match else_entry {
         Some(else_entry) => {
-            let else_nodes = collect_nodes_between(cfg, dominance, head, else_entry, join);
+            let else_nodes = collect_nodes_between(cfg, dominance, head, else_entry, join, scope);
             if else_nodes.is_empty()
-                || contains_sess_violation(cfg, head, else_entry, &else_nodes, join)
+                || contains_sess_violation(cfg, head, else_entry, &else_nodes, join, scope)
             {
                 return None;
             }
@@ -135,7 +169,7 @@ fn find_if(cfg: &RegionCfg, dominance: &RegionDominance, head: NodeIndex) -> Opt
     })
 }
 
-fn contract_if(cfg: &mut RegionCfg, if_schema: IfSchema) -> RegionId {
+pub(crate) fn contract_if(cfg: &mut RegionCfg, if_schema: IfSchema) -> RegionId {
     let head_node = cfg
         .node_for_key(if_schema.head)
         .expect("missing node for if_node");
@@ -191,6 +225,7 @@ fn collect_nodes_between(
     head: NodeIndex,
     then_entry: NodeIndex,
     join: NodeIndex,
+    scope: Option<&HashSet<RegionId>>,
 ) -> HashSet<NodeIndex> {
     let mut queue = VecDeque::new();
     let mut visited = HashSet::new();
@@ -201,14 +236,15 @@ fn collect_nodes_between(
             continue;
         }
 
-        if !dominance.dominates(head, u) || !dominance.post_dominates(join, u) {
+        if !is_in_scope(cfg, u, scope)
+            || !dominance.dominates(head, u)
+            || !dominance.post_dominates(join, u)
+        {
             continue;
         }
 
         visited.insert(u);
-        for succ in cfg.graph().neighbors_directed(u, Direction::Outgoing) {
-            queue.push_back(succ);
-        }
+        queue.extend(scoped_neighbors(cfg, u, Direction::Outgoing, scope));
     }
     visited
 }
@@ -220,11 +256,12 @@ fn contains_sess_violation(
     body_entry: NodeIndex,
     body_nodes: &HashSet<NodeIndex>,
     join: NodeIndex,
+    scope: Option<&HashSet<RegionId>>,
 ) -> bool {
     // then_nodes以外のノードからの入辺が存在してはならない
     // ただし、headからthenへのエッジは存在してもよい
     for &node in body_nodes {
-        for pred in cfg.graph().neighbors_directed(node, Direction::Incoming) {
+        for pred in scoped_neighbors(cfg, node, Direction::Incoming, scope) {
             if pred == head && node == body_entry {
                 continue;
             }
@@ -236,7 +273,7 @@ fn contains_sess_violation(
 
     // then_nodes,join以外のノードへの出辺が存在してはならない
     for &node in body_nodes {
-        for succ in cfg.graph().neighbors_directed(node, Direction::Outgoing) {
+        for succ in scoped_neighbors(cfg, node, Direction::Outgoing, scope) {
             if !(body_nodes.contains(&succ) || succ == join) {
                 return true;
             }
@@ -244,7 +281,7 @@ fn contains_sess_violation(
     }
 
     // headについて、then_entry以外にthen_nodesへの出辺が存在してはならない
-    for succ in cfg.graph().neighbors_directed(head, Direction::Outgoing) {
+    for succ in scoped_neighbors(cfg, head, Direction::Outgoing, scope) {
         if body_nodes.contains(&succ) && succ != body_entry {
             return true;
         }

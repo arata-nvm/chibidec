@@ -12,13 +12,19 @@ use crate::{
     graph::{IndexedGraphView, IndexedGraphViewMut},
 };
 
-pub fn contract_cyclic_region(cfg: &mut RegionCfg, structured_loop: &StructuredLoop) -> RegionId {
-    contract_loop(cfg, structured_loop)
+pub fn contract_cyclic_region(
+    cfg: &mut RegionCfg,
+    structured_loop: &StructuredLoop,
+    body: RegionId,
+) -> RegionId {
+    contract_loop(cfg, structured_loop, body)
 }
 
-fn contract_loop(cfg: &mut RegionCfg, structured_loop: &StructuredLoop) -> RegionId {
-    let body = Region::Seq(structured_loop.body.iter().copied().collect());
-    let (body_region, _) = cfg.add_region(body);
+fn contract_loop(
+    cfg: &mut RegionCfg,
+    structured_loop: &StructuredLoop,
+    body_region: RegionId,
+) -> RegionId {
     let loop_ = Region::Loop {
         kind: structured_loop.loop_exit.kind(),
         meta: structured_loop.clone(),
@@ -26,46 +32,22 @@ fn contract_loop(cfg: &mut RegionCfg, structured_loop: &StructuredLoop) -> Regio
     };
     let (loop_region, loop_node) = cfg.add_region(loop_);
 
-    let entry_node = cfg
-        .node_for_key(structured_loop.entry)
-        .expect("region should have node");
-    let body_nodes: HashSet<_> = structured_loop
-        .body
-        .iter()
-        .map(|region| cfg.node_for_key(*region).expect("region should have node"))
-        .collect();
-    cfg.redirect_edges_except(entry_node, loop_node, &body_nodes, Direction::Incoming);
+    let body_node = cfg
+        .node_for_key(body_region)
+        .expect("loop body region should have node");
+    cfg.redirect_edges(body_node, loop_node, Direction::Incoming);
 
-    if let Some((exit_node, exit_edge)) = structured_loop.loop_exit.exit() {
-        let edge_label = cfg
-            .graph()
-            .edge_weight(exit_edge)
-            .expect("edge should exist")
-            .clone();
-
-        for node in &body_nodes {
-            while let Some(edge) = cfg.graph().find_edge(*node, exit_node) {
-                cfg.graph_mut().remove_edge(edge);
-            }
-        }
-
-        let head_node = cfg
-            .node_for_key(structured_loop.head)
-            .expect("region should have node");
-        while let Some(edge) = cfg.graph().find_edge(head_node, exit_node) {
+    if let Some((exit_node, edge_label)) = structured_loop.loop_exit.exit_target_and_label() {
+        while let Some(edge) = cfg.graph().find_edge(body_node, exit_node) {
             cfg.graph_mut().remove_edge(edge);
         }
-
-        cfg.graph_mut().remove_edge(exit_edge);
-
         if cfg.graph().find_edge(loop_node, exit_node).is_none() {
             cfg.graph_mut().add_edge(loop_node, exit_node, edge_label);
         }
     }
 
-    for node in body_nodes {
-        cfg.remove_node_by_index(node).expect("node should exist");
-    }
+    cfg.remove_node_by_index(body_node)
+        .expect("loop body node should exist");
 
     loop_region
 }
@@ -230,7 +212,16 @@ impl StructuredLoop {
         let entry_region = cfg
             .key_for_node(entry)
             .expect("loop entry should have region id");
-        let cond = extract_condition(cfg, raw_loop.head, entry, loop_exit.exit_node());
+        let cond = match loop_exit.kind() {
+            LoopKind::DoWhile => loop_exit
+                .exit_edge()
+                .and_then(|edge| cfg.graph().edge_weight(edge))
+                .and_then(|label| label.effective_condition())
+                .map(|cond| cond.negate()),
+            LoopKind::While | LoopKind::NatLoop => {
+                extract_condition(cfg, raw_loop.head, entry, loop_exit.exit_node())
+            }
+        };
         Self::new(
             raw_loop.loop_index,
             loop_exit,
@@ -313,6 +304,7 @@ pub struct LoopExit {
     kind: LoopKind,
     exit_node: Option<NodeIndex>,
     exit_edge: Option<EdgeIndex>,
+    exit_label: Option<EdgeLabel>,
 }
 
 impl LoopExit {
@@ -330,6 +322,10 @@ impl LoopExit {
 
     pub fn exit(&self) -> Option<(NodeIndex, EdgeIndex)> {
         self.exit_node.zip(self.exit_edge)
+    }
+
+    pub fn exit_target_and_label(&self) -> Option<(NodeIndex, EdgeLabel)> {
+        self.exit_node.zip(self.exit_label.clone())
     }
 }
 
@@ -359,6 +355,7 @@ fn select_single_exit(
             kind: LoopKind::While,
             exit_node: Some(succ),
             exit_edge: Some(edge),
+            exit_label: cfg.graph().edge_weight(edge).cloned(),
         });
     }
 
@@ -381,6 +378,7 @@ fn select_single_exit(
             kind: LoopKind::DoWhile,
             exit_node: Some(succ),
             exit_edge: Some(edge),
+            exit_label: cfg.graph().edge_weight(edge).cloned(),
         });
     }
 
@@ -395,6 +393,7 @@ fn select_single_exit(
             kind: LoopKind::NatLoop,
             exit_node: Some(succ),
             exit_edge: Some(nat_edge),
+            exit_label: cfg.graph().edge_weight(nat_edge).cloned(),
         });
     }
 
@@ -402,6 +401,7 @@ fn select_single_exit(
         kind: LoopKind::NatLoop,
         exit_node: None,
         exit_edge: None,
+        exit_label: None,
     });
 
     fn pick_edge_deterministically(

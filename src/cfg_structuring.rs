@@ -1,9 +1,10 @@
 pub mod cycle;
 pub mod if_then;
 pub mod region;
+mod scope;
 pub mod seq;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
 use petgraph::{
@@ -15,9 +16,9 @@ use crate::{
     cfg_recovery::cfg::Cfg,
     cfg_structuring::{
         cycle::{contract_cyclic_region, find_loop, find_smallest_loop},
-        if_then::match_if,
+        if_then::{IfSchema, contract_if, find_if_in_scope, match_if},
         region::{Region, RegionCfg, RegionDominance},
-        seq::match_seq,
+        seq::{contract_seq, find_seq_in_scope, match_seq},
     },
     graph::{IndexedGraphView, IndexedGraphViewMut},
 };
@@ -48,52 +49,10 @@ pub fn structure_cfg(cfg: &Cfg) -> Result<RegionCfg> {
                 strucutured_loops.push(structured_loop.clone());
                 virtualized_edges.extend(tail_edges);
 
-                let mut body_graph = region_cfg.clone();
-                for node in body_graph.clone().graph().node_indices() {
-                    let region = region_cfg
-                        .key_for_node(node)
-                        .expect("node should have region");
-                    if !structured_loop.body.contains(&region) {
-                        body_graph.graph_mut().remove_node(node);
-                    }
-                }
-
-                let body_vexit = body_graph.add_vexit().context("failed to add vexit")?;
-
-                while body_graph.graph().node_count() > 1 {
-                    let body_entry = body_graph.entry().expect("graph should have entry node");
-                    let mut order = DfsPostOrder::new(body_graph.graph(), body_entry);
-                    let dominance = body_graph
-                        .compute_dominance()
-                        .expect("failed to compute dominance");
-
-                    while let Some(head) = order.next(body_graph.graph()) {
-                        if match_acyclic(&mut body_graph, &dominance, head) {
-                            progress = true;
-                            break;
-                        }
-                    }
-
-                    if !progress {
-                        bail!("failed to find any acyclic pattern in loop");
-                    }
-                }
-
-                let loop_region = contract_cyclic_region(&mut region_cfg, &structured_loop);
-                body_graph.graph_mut().remove_node(body_vexit);
-                let mut body_node_iter = body_graph.graph().node_indices();
-                if let (Some(root_node), None) = (body_node_iter.next(), body_node_iter.next()) {
-                    let root_region = body_graph
-                        .key_for_node(root_node)
-                        .expect("node should have region");
-                    let Region::Loop { body, .. } = region_cfg
-                        .region_mut(loop_region)
-                        .expect("region should exist")
-                    else {
-                        bail!("invalid region");
-                    };
-                    *body = root_region;
-                }
+                let body_region = reduce_loop_body(&mut region_cfg, structured_loop.body.clone())?;
+                contract_cyclic_region(&mut region_cfg, &structured_loop, body_region);
+                progress = true;
+                break;
             } else {
                 progress = match_acyclic(&mut region_cfg, &dominance, head);
                 if progress {
@@ -142,4 +101,70 @@ fn build_region_cfg(cfg: &Cfg) -> Result<RegionCfg> {
 
 fn match_acyclic(cfg: &mut RegionCfg, dominance: &RegionDominance, head: NodeIndex) -> bool {
     match_seq(cfg, head) || match_if(cfg, dominance, head)
+}
+
+fn reduce_loop_body(
+    cfg: &mut RegionCfg,
+    mut scope: HashSet<region::RegionId>,
+) -> Result<region::RegionId> {
+    while scope.len() > 1 {
+        let dominance = cfg
+            .compute_dominance()
+            .context("failed to compute dominance")?;
+        let mut body_nodes: Vec<_> = scope
+            .iter()
+            .map(|region| {
+                cfg.node_for_key(*region)
+                    .context("loop body region should have node")
+            })
+            .collect::<Result<_>>()?;
+        body_nodes.sort_by_key(|node| node.index());
+
+        let mut progress = false;
+        for head in body_nodes {
+            if let Some(seq) = find_seq_in_scope(cfg, head, &scope) {
+                let old_regions: Vec<_> = seq
+                    .iter()
+                    .map(|node| cfg.key_for_node(*node).expect("node should have region"))
+                    .collect();
+                let new_region = contract_seq(cfg, &seq);
+                for region in old_regions {
+                    scope.remove(&region);
+                }
+                scope.insert(new_region);
+                progress = true;
+                break;
+            }
+
+            if let Some(if_schema) = find_if_in_scope(cfg, &dominance, head, &scope) {
+                let old_regions = if_regions_removed_from_scope(&if_schema);
+                let new_region = contract_if(cfg, if_schema);
+                for region in old_regions {
+                    scope.remove(&region);
+                }
+                scope.insert(new_region);
+                progress = true;
+                break;
+            }
+        }
+
+        if !progress {
+            bail!("failed to find any acyclic pattern in loop");
+        }
+    }
+
+    scope
+        .into_iter()
+        .next()
+        .context("loop body should contain at least one region")
+}
+
+fn if_regions_removed_from_scope(if_schema: &IfSchema) -> Vec<region::RegionId> {
+    let mut regions = Vec::new();
+    regions.push(if_schema.head);
+    regions.extend(if_schema.then_body.iter().copied());
+    if let Some(else_body) = &if_schema.else_body {
+        regions.extend(else_body.iter().copied());
+    }
+    regions
 }
