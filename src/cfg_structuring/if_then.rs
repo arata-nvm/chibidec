@@ -1,20 +1,15 @@
 use std::collections::{HashSet, VecDeque};
 
-use petgraph::{Direction, algo::dominators::Dominators, graph::NodeIndex};
+use petgraph::{Direction, graph::NodeIndex};
 
 use crate::{
     cfg_recovery::cfg::{Condition, EdgeLabel},
-    cfg_structuring::region::{Region, RegionCfg, RegionId},
+    cfg_structuring::region::{Region, RegionCfg, RegionDominance, RegionId},
     graph::{IndexedGraphView, IndexedGraphViewMut},
 };
 
-pub(crate) fn match_if(
-    cfg: &mut RegionCfg,
-    dom: &Dominators<NodeIndex>,
-    pdom: &Dominators<NodeIndex>,
-    head: NodeIndex,
-) -> bool {
-    match find_if(cfg, dom, pdom, head) {
+pub(crate) fn match_if(cfg: &mut RegionCfg, dominance: &RegionDominance, head: NodeIndex) -> bool {
+    match find_if(cfg, dominance, head) {
         Some(if_schema) => {
             contract_if(cfg, if_schema);
             true
@@ -65,12 +60,7 @@ impl From<IfSchema> for Region {
     }
 }
 
-fn find_if(
-    cfg: &RegionCfg,
-    dom: &Dominators<NodeIndex>,
-    pdom: &Dominators<NodeIndex>,
-    head: NodeIndex,
-) -> Option<IfSchema> {
+fn find_if(cfg: &RegionCfg, dominance: &RegionDominance, head: NodeIndex) -> Option<IfSchema> {
     let mut succs = cfg.graph().neighbors_directed(head, Direction::Outgoing);
     let succ1 = succs.next()?;
     let succ2 = succs.next()?;
@@ -78,7 +68,7 @@ fn find_if(
         return None;
     }
 
-    let join = pdom.immediate_dominator(head)?;
+    let join = dominance.immediate_post_dominator(head)?;
     let (then_entry, else_entry) = match (succ1 == join, succ2 == join) {
         (false, true) => (succ1, None),
         (true, false) => (succ2, None),
@@ -97,14 +87,14 @@ fn find_if(
         return None;
     }
 
-    let then_nodes = collect_nodes_between(cfg, dom, pdom, head, then_entry, join);
+    let then_nodes = collect_nodes_between(cfg, dominance, head, then_entry, join);
     if then_nodes.is_empty() || contains_sess_violation(cfg, head, then_entry, &then_nodes, join) {
         return None;
     }
 
     let else_nodes = match else_entry {
         Some(else_entry) => {
-            let else_nodes = collect_nodes_between(cfg, dom, pdom, head, else_entry, join);
+            let else_nodes = collect_nodes_between(cfg, dominance, head, else_entry, join);
             if else_nodes.is_empty()
                 || contains_sess_violation(cfg, head, else_entry, &else_nodes, join)
             {
@@ -197,8 +187,7 @@ fn contract_if(cfg: &mut RegionCfg, if_schema: IfSchema) -> RegionId {
 // headに支配され、かつjoinに後続支配されるノードを探索する
 fn collect_nodes_between(
     cfg: &RegionCfg,
-    dom: &Dominators<NodeIndex>,
-    pdom: &Dominators<NodeIndex>,
+    dominance: &RegionDominance,
     head: NodeIndex,
     then_entry: NodeIndex,
     join: NodeIndex,
@@ -212,17 +201,7 @@ fn collect_nodes_between(
             continue;
         }
 
-        let Some(mut dominators) = dom.dominators(u) else {
-            continue;
-        };
-        if !dominators.any(|d| d == head) {
-            continue;
-        }
-
-        let Some(mut post_dominators) = pdom.dominators(u) else {
-            continue;
-        };
-        if !post_dominators.any(|d| d == join) {
+        if !dominance.dominates(head, u) || !dominance.post_dominates(join, u) {
             continue;
         }
 

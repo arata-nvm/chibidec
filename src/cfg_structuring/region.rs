@@ -1,7 +1,11 @@
 use anyhow::{Result, anyhow};
 use id_arena::{Arena, Id};
 use petgraph::{
-    Direction, algo::dominators::Dominators, graph::NodeIndex, prelude::StableGraph, visit::EdgeRef,
+    Direction,
+    algo::dominators::{self, Dominators},
+    graph::NodeIndex,
+    prelude::StableGraph,
+    visit::{EdgeRef, Reversed},
 };
 
 use crate::{
@@ -75,6 +79,10 @@ impl RegionCfg {
         self.vexit
     }
 
+    pub fn compute_dominance(&self) -> Option<RegionDominance> {
+        Some(RegionDominance::compute(self, self.entry()?, self.vexit()))
+    }
+
     pub(crate) fn remove_node_by_index(&mut self, node: NodeIndex) -> Result<()> {
         let key = self
             .key_for_node(node)
@@ -88,34 +96,6 @@ impl RegionCfg {
 
     pub(crate) fn degree(&self, node: NodeIndex, direction: Direction) -> usize {
         self.graph().edges_directed(node, direction).count()
-    }
-
-    pub(crate) fn backedge_targets(
-        &self,
-        node: NodeIndex,
-        dominators: &Dominators<NodeIndex>,
-    ) -> impl Iterator<Item = NodeIndex> {
-        return self
-            .graph()
-            .neighbors_directed(node, Direction::Outgoing)
-            .filter(move |&succ| dominates(succ, node, dominators));
-
-        fn dominates(
-            node1: NodeIndex,
-            node2: NodeIndex,
-            dominators: &Dominators<NodeIndex>,
-        ) -> bool {
-            dominators
-                .dominators(node2)
-                .is_some_and(|mut it| it.any(|d| d == node1))
-        }
-    }
-
-    pub(crate) fn has_backedge(&self, node: NodeIndex, dominators: &Dominators<NodeIndex>) -> bool {
-        if node == self.vexit {
-            return false;
-        }
-        self.backedge_targets(node, dominators).next().is_some()
     }
 
     // nodeのdir方向の隣接ノードが1つだけ存在する場合は、そのノードを返す。それ以外の場合はNoneを返す。
@@ -175,5 +155,55 @@ impl RegionCfg {
 
     pub fn dot(&self) -> String {
         export_region_cfg_to_dot(&self.regions, self.graph())
+    }
+}
+
+pub struct RegionDominance {
+    dom: Dominators<NodeIndex>,
+    pdom: Dominators<NodeIndex>,
+    vexit: NodeIndex,
+}
+
+impl RegionDominance {
+    fn compute(cfg: &RegionCfg, entry: NodeIndex, vexit: NodeIndex) -> Self {
+        let dom = dominators::simple_fast(cfg.graph(), entry);
+        let pdom = dominators::simple_fast(Reversed(cfg.graph()), vexit);
+        Self { dom, pdom, vexit }
+    }
+
+    pub fn dominates(&self, a: NodeIndex, b: NodeIndex) -> bool {
+        let Some(mut dominators) = self.dom.dominators(b) else {
+            return false;
+        };
+        dominators.any(|d| d == a)
+    }
+
+    pub fn post_dominates(&self, a: NodeIndex, b: NodeIndex) -> bool {
+        let Some(mut dominators) = self.pdom.dominators(b) else {
+            return false;
+        };
+        dominators.any(|d| d == a)
+    }
+
+    pub fn immediate_post_dominator(&self, node: NodeIndex) -> Option<NodeIndex> {
+        self.pdom.immediate_dominator(node)
+    }
+
+    pub fn backedge_targets(
+        &self,
+        cfg: &RegionCfg,
+        node: NodeIndex,
+    ) -> impl Iterator<Item = NodeIndex> {
+        return cfg
+            .graph()
+            .neighbors_directed(node, Direction::Outgoing)
+            .filter(move |&succ| self.dominates(succ, node));
+    }
+
+    pub fn has_backedge(&self, cfg: &RegionCfg, node: NodeIndex) -> bool {
+        if node == self.vexit {
+            return false;
+        }
+        self.backedge_targets(cfg, node).next().is_some()
     }
 }

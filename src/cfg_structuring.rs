@@ -7,16 +7,15 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, bail};
 use petgraph::{
     Direction,
-    algo::dominators::{self, Dominators},
     graph::NodeIndex,
-    visit::{DfsPostOrder, EdgeRef, IntoEdgeReferences, Reversed},
+    visit::{DfsPostOrder, EdgeRef, IntoEdgeReferences},
 };
 
 use crate::{
     cfg_recovery::cfg::{Cfg, EdgeLabel},
     cfg_structuring::{
         if_then::match_if,
-        region::{Region, RegionCfg},
+        region::{Region, RegionCfg, RegionDominance},
         seq::match_seq,
     },
     graph::{IndexedGraphView, IndexedGraphViewMut},
@@ -30,16 +29,17 @@ pub fn structure_cfg(cfg: &Cfg) -> Result<RegionCfg> {
         std::fs::write(format!("tmp/region_cfg_{}.dot", count), region_cfg.dot())
             .expect("failed to write region cfg dot file");
         let entry = region_cfg.entry().context("failed to find entry region")?;
-        let dom = dominators::simple_fast(region_cfg.graph(), entry);
-        let pdom = dominators::simple_fast(Reversed(region_cfg.graph()), region_cfg.vexit());
+        let dominance = region_cfg
+            .compute_dominance()
+            .context("failed to compute region dominance")?;
 
         let mut progress = false;
         let mut order = DfsPostOrder::new(region_cfg.graph(), entry);
         while let Some(head) = order.next(region_cfg.graph()) {
-            if region_cfg.has_backedge(head, &dom) {
+            if dominance.has_backedge(&region_cfg, head) {
                 eprintln!("cycle discovered: {}", head.index());
             } else {
-                progress = match_acyclic(&mut region_cfg, &dom, &pdom, head);
+                progress = match_acyclic(&mut region_cfg, &dominance, head);
                 if progress {
                     count += 1;
                     break;
@@ -97,11 +97,6 @@ fn build_region_cfg(cfg: &Cfg) -> Result<RegionCfg> {
     Ok(region_cfg)
 }
 
-fn match_acyclic(
-    cfg: &mut RegionCfg,
-    dom: &Dominators<NodeIndex>,
-    pdom: &Dominators<NodeIndex>,
-    head: NodeIndex,
-) -> bool {
-    match_seq(cfg, head) || match_if(cfg, dom, pdom, head)
+fn match_acyclic(cfg: &mut RegionCfg, dominance: &RegionDominance, head: NodeIndex) -> bool {
+    match_seq(cfg, head) || match_if(cfg, dominance, head)
 }
