@@ -4,30 +4,36 @@ use anyhow::{Result, anyhow};
 use petgraph::{graph::NodeIndex, prelude::StableGraph};
 
 #[derive(Debug, Clone)]
-pub(crate) struct IndexedGraph<K, E> {
+pub struct IndexedGraph<K, E> {
     graph: StableGraph<K, E>,
     key_to_node: HashMap<K, NodeIndex>,
+}
+
+impl<K, E> Default for IndexedGraph<K, E> {
+    fn default() -> Self {
+        Self {
+            graph: StableGraph::new(),
+            key_to_node: HashMap::new(),
+        }
+    }
 }
 
 impl<K, E> IndexedGraph<K, E>
 where
     K: Copy + Eq + Hash + fmt::Debug,
 {
-    pub(crate) fn new() -> Self {
-        Self {
-            graph: StableGraph::new(),
-            key_to_node: HashMap::new(),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    pub(crate) fn with_capacity(nodes: usize, edges: usize) -> Self {
+    pub fn with_capacity(nodes: usize, edges: usize) -> Self {
         Self {
             graph: StableGraph::with_capacity(nodes, edges),
             key_to_node: HashMap::with_capacity(nodes),
         }
     }
 
-    pub(crate) fn from_graph(graph: StableGraph<K, E>) -> Self {
+    pub fn from_graph(graph: StableGraph<K, E>) -> Self {
         let key_to_node = graph
             .node_indices()
             .filter_map(|node| graph.node_weight(node).copied().map(|key| (key, node)))
@@ -36,15 +42,15 @@ where
         Self { graph, key_to_node }
     }
 
-    pub(crate) fn graph(&self) -> &StableGraph<K, E> {
+    pub fn graph(&self) -> &StableGraph<K, E> {
         &self.graph
     }
 
-    pub(crate) fn graph_mut(&mut self) -> &mut StableGraph<K, E> {
+    pub fn graph_mut(&mut self) -> &mut StableGraph<K, E> {
         &mut self.graph
     }
 
-    pub(crate) fn add_node(&mut self, key: K) -> NodeIndex {
+    pub fn add_node(&mut self, key: K) -> NodeIndex {
         assert!(
             !self.key_to_node.contains_key(&key),
             "key already exists in graph: {key:?}",
@@ -55,7 +61,7 @@ where
         node
     }
 
-    pub(crate) fn remove_node(&mut self, key: K) -> Result<()> {
+    pub fn remove_node(&mut self, key: K) -> Result<()> {
         let node = self
             .key_to_node
             .remove(&key)
@@ -66,16 +72,16 @@ where
         Ok(())
     }
 
-    pub(crate) fn key_for_node(&self, node: NodeIndex) -> Option<K> {
+    pub fn key_for_node(&self, node: NodeIndex) -> Option<K> {
         self.graph.node_weight(node).copied()
     }
 
-    pub(crate) fn node_for_key(&self, key: K) -> Option<NodeIndex> {
+    pub fn node_for_key(&self, key: K) -> Option<NodeIndex> {
         self.key_to_node.get(&key).copied()
     }
 }
 
-pub(crate) trait IndexedGraphView {
+pub trait IndexedGraphView {
     type Key: Copy + Eq + Hash + fmt::Debug;
     type Edge;
 
@@ -94,7 +100,7 @@ pub(crate) trait IndexedGraphView {
     }
 }
 
-pub(crate) trait IndexedGraphViewMut: IndexedGraphView {
+pub trait IndexedGraphViewMut: IndexedGraphView {
     fn inner_mut(&mut self) -> &mut IndexedGraph<Self::Key, Self::Edge>;
 
     fn graph_mut(&mut self) -> &mut StableGraph<Self::Key, Self::Edge> {

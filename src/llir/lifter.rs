@@ -1,27 +1,23 @@
 use capstone::{
     RegId,
-    arch::arm64::{Arm64Insn, Arm64Operand, Arm64OperandType, Arm64Reg},
+    arch::arm64::{Arm64CC, Arm64Insn, Arm64Operand, Arm64OperandType, Arm64Reg},
 };
 
 use crate::{
     disassemble::MachineInst,
     llir::{
-        BinOp, Instruction, InstructionKind, InstructionOrTerminator, LinearFunction, Reg, Rhs,
-        Terminator, TerminatorKind, Value, Var,
+        BinOp, BranchCondition, BranchTarget, Instruction, InstructionKind,
+        InstructionOrTerminator, LinearProgram, Reg, Rhs, Terminator, TerminatorKind, Value, Var,
     },
 };
 
-pub fn lift_linear_function(name: impl Into<String>, minsns: &[MachineInst]) -> LinearFunction {
+pub fn lift_text(minsns: &[MachineInst]) -> LinearProgram {
     let mut ctx = LifterCtx::new();
-    let insns = minsns
+    let items = minsns
         .iter()
         .flat_map(|insn| lift_inst(&mut ctx, insn))
         .collect();
-
-    LinearFunction {
-        name: name.into(),
-        insns,
-    }
+    LinearProgram { items }
 }
 
 #[derive(Debug, Default)]
@@ -45,14 +41,16 @@ fn lift_inst(ctx: &mut LifterCtx, minsn: &MachineInst) -> Vec<InstructionOrTermi
     match minsn.opcode {
         Arm64Insn::ARM64_INS_ADD => lift_binop(minsn, BinOp::Add),
         Arm64Insn::ARM64_INS_ADRP => lift_adrp(minsn),
+        Arm64Insn::ARM64_INS_B => lift_b(minsn),
         Arm64Insn::ARM64_INS_BL => lift_bl(minsn),
+        Arm64Insn::ARM64_INS_CBNZ => lift_cbnz(minsn),
         Arm64Insn::ARM64_INS_LDP => lift_ldp(ctx, minsn),
         Arm64Insn::ARM64_INS_LDR => lift_ldr(ctx, minsn),
         Arm64Insn::ARM64_INS_MOV => lift_mov(minsn),
         Arm64Insn::ARM64_INS_RET => lift_ret(minsn),
         Arm64Insn::ARM64_INS_STP => lift_stp(ctx, minsn),
         Arm64Insn::ARM64_INS_STR | Arm64Insn::ARM64_INS_STUR => lift_str(ctx, minsn),
-        Arm64Insn::ARM64_INS_SUB => lift_binop(minsn, BinOp::Sub),
+        Arm64Insn::ARM64_INS_SUB | Arm64Insn::ARM64_INS_SUBS => lift_binop(minsn, BinOp::Sub),
         _ => unimplemented!(
             "unsupported instruction at {:#x}: {} {}",
             minsn.addr,
@@ -63,6 +61,15 @@ fn lift_inst(ctx: &mut LifterCtx, minsn: &MachineInst) -> Vec<InstructionOrTermi
 }
 
 fn lift_binop(minsn: &MachineInst, op: BinOp) -> Vec<InstructionOrTerminator> {
+    let rhs = match &operand(minsn, 2).op_type {
+        Arm64OperandType::Reg(reg) => Value::Var(Var::Reg((*reg).into())),
+        Arm64OperandType::Imm(imm) => Value::Imm(*imm),
+        _ => panic!(
+            "unsupported mov operand at {:#x}: {} {}",
+            minsn.addr, minsn.mnemonic, minsn.op_str
+        ),
+    };
+
     vec![insn(
         minsn.addr,
         InstructionKind::Assign {
@@ -70,7 +77,7 @@ fn lift_binop(minsn: &MachineInst, op: BinOp) -> Vec<InstructionOrTerminator> {
             src: Rhs::BinOp {
                 op,
                 lhs: Value::Var(Var::Reg(opr_reg(minsn, 1))),
-                rhs: Value::Imm(opr_imm(minsn, 2)),
+                rhs,
             },
         },
     )]
@@ -88,11 +95,36 @@ fn lift_adrp(minsn: &MachineInst) -> Vec<InstructionOrTerminator> {
     )]
 }
 
+fn lift_b(minsn: &MachineInst) -> Vec<InstructionOrTerminator> {
+    let target = BranchTarget::Imm(opr_imm(minsn, 0) as u64);
+    if minsn.cc == Arm64CC::ARM64_CC_INVALID {
+        vec![term(minsn.addr, TerminatorKind::Branch { target })]
+    } else {
+        vec![term(
+            minsn.addr,
+            TerminatorKind::ConditionalBranch {
+                cond: format_arm64_cond(minsn.cc),
+                target,
+            },
+        )]
+    }
+}
+
 fn lift_bl(minsn: &MachineInst) -> Vec<InstructionOrTerminator> {
     vec![insn(
         minsn.addr,
         InstructionKind::Call {
             target: Value::Imm(opr_imm(minsn, 0)),
+        },
+    )]
+}
+
+fn lift_cbnz(minsn: &MachineInst) -> Vec<InstructionOrTerminator> {
+    vec![term(
+        minsn.addr,
+        TerminatorKind::ConditionalBranch {
+            cond: BranchCondition::NonZero(Value::Var(Var::Reg(opr_reg(minsn, 0)))),
+            target: BranchTarget::Imm(opr_imm(minsn, 1) as u64),
         },
     )]
 }
@@ -239,6 +271,13 @@ fn reject_writeback(minsn: &MachineInst) {
         "unsupported writeback addressing at {:#x}: {} {}",
         minsn.addr, minsn.mnemonic, minsn.op_str
     );
+}
+
+fn format_arm64_cond(cc: Arm64CC) -> BranchCondition {
+    match cc {
+        Arm64CC::ARM64_CC_GE => BranchCondition::Ge,
+        _ => unimplemented!("unsupported ARM64 condition code {cc:?}"),
+    }
 }
 
 fn insn(addr: u64, kind: InstructionKind) -> InstructionOrTerminator {

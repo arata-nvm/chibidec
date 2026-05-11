@@ -49,6 +49,7 @@ pub struct MachineInst {
     pub mnemonic: String,
     pub op_str: String,
     pub opcode: Arm64Insn,
+    pub cc: Arm64CC,
     pub operands: Vec<Arm64Operand>,
     pub writeback: bool,
 }
@@ -66,6 +67,7 @@ impl MachineInst {
             mnemonic: insn.mnemonic().unwrap_or("???").to_string(),
             op_str: insn.op_str().unwrap_or("").to_string(),
             opcode: Arm64Insn::from(insn.id().0),
+            cc: detail.cc(),
             operands: detail.operands().collect(),
             writeback: detail.writeback(),
         })

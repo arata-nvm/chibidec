@@ -86,6 +86,13 @@ pub struct Symbol {
 }
 
 impl Symbol {
+    pub fn new(name: impl Into<String>, addr: u64) -> Self {
+        Self {
+            addr,
+            name: name.into(),
+        }
+    }
+
     pub fn addr(&self) -> u64 {
         self.addr
     }
