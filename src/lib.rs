@@ -6,7 +6,8 @@ use crate::{
     binary::Binary,
     cfg_recovery::recover_cfg,
     cfg_structuring::{asm::render_structured_assembly, structure_cfg},
-    disassemble::disassemble,
+    disassemble::{disassemble, disassemble_detailed},
+    llir::lifter::lift_linear_function,
 };
 
 pub mod binary;
@@ -15,10 +16,12 @@ pub mod cfg_structuring;
 pub mod disassemble;
 pub mod dot;
 pub mod graph;
+pub mod llir;
 
 pub fn decompile(binary_path: &Path) -> Result<()> {
     let binary_data = std::fs::read(binary_path).context("failed to read binary file")?;
     let binary = Binary::parse(&binary_data).context("failed to parse binary")?;
+    std::fs::create_dir_all("tmp").context("failed to create tmp directory")?;
 
     let text_section = binary
         .section_by_name("__text")
@@ -27,6 +30,12 @@ pub fn decompile(binary_path: &Path) -> Result<()> {
         .context("failed to disassemble __text section")?;
     let icfg = recover_cfg(&text_insns, &binary.symbols());
     std::fs::write("tmp/icfg.dot", icfg.dot())?;
+
+    let detailed_text_insns = disassemble_detailed(text_section.data(), text_section.addr())
+        .context("failed to disassemble __text section with details")?;
+    let main_llir = lift_linear_function("_main", &detailed_text_insns);
+    std::fs::write("tmp/llir.txt", main_llir.to_string())
+        .context("failed to write tmp/llir.txt")?;
 
     let main_cfg = icfg
         .extract_function_by_label("_main")

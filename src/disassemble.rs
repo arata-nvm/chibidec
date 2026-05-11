@@ -5,7 +5,7 @@ use capstone::{
     Capstone,
     arch::{
         self, ArchDetail, BuildsCapstone, DetailsArchInsn,
-        arm64::{Arm64CC, Arm64Insn, Arm64InsnDetail, Arm64OperandType},
+        arm64::{Arm64CC, Arm64Insn, Arm64InsnDetail, Arm64Operand, Arm64OperandType},
     },
 };
 
@@ -24,6 +24,52 @@ pub fn disassemble(code: &[u8], addr: u64) -> Result<InstructionSequence> {
         .map(|insn| Instruction::from_insn(&cs, insn))
         .collect::<Result<_, _>>()?;
     Ok(InstructionSequence::new(insns))
+}
+
+pub fn disassemble_detailed(code: &[u8], addr: u64) -> Result<Vec<MachineInst>> {
+    let cs = Capstone::new()
+        .arm64()
+        .mode(arch::arm64::ArchMode::Arm)
+        .detail(true)
+        .build()
+        .context("failed to build capstone")?;
+    let cs_insns = cs
+        .disasm_all(code, addr)
+        .context("failed to disassemble code")?;
+    cs_insns
+        .iter()
+        .map(|insn| MachineInst::from_insn(&cs, insn))
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+pub struct MachineInst {
+    pub addr: u64,
+    pub len: usize,
+    pub mnemonic: String,
+    pub op_str: String,
+    pub opcode: Arm64Insn,
+    pub operands: Vec<Arm64Operand>,
+    pub writeback: bool,
+}
+
+impl MachineInst {
+    fn from_insn(cs: &Capstone, insn: &capstone::Insn) -> Result<Self> {
+        let detail = cs.insn_detail(insn)?;
+        let ArchDetail::Arm64Detail(detail) = detail.arch_detail() else {
+            bail!("unsupported architecture");
+        };
+
+        Ok(Self {
+            addr: insn.address(),
+            len: insn.len(),
+            mnemonic: insn.mnemonic().unwrap_or("???").to_string(),
+            op_str: insn.op_str().unwrap_or("").to_string(),
+            opcode: Arm64Insn::from(insn.id().0),
+            operands: detail.operands().collect(),
+            writeback: detail.writeback(),
+        })
+    }
 }
 
 #[derive(Debug)]
