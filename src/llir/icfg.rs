@@ -65,7 +65,7 @@ impl Icfg {
     pub fn add_block(&mut self, insns: Vec<Instruction>, term: Terminator) -> NodeIndex {
         let block = self
             .blocks
-            .alloc_with_id(|id| Block::new(id, insns, term, None));
+            .alloc_with_id(|id| Block::new(id, None, insns, term));
         self.inner.add_node(block)
     }
 
@@ -135,7 +135,8 @@ fn export_llir_cfg_to_dot(blocks: &Arena<Block>, graph: &StableGraph<BlockId, Ed
     let get_node_attributes = |_, (_, &block_id)| {
         let block = blocks.get(block_id).expect("block_id must be valid");
         let mut lines = vec![format!(
-            "{block_id:?}({}) [{:#x}-{:#x}]",
+            "{}({}) [{:#x}-{:#x}]",
+            block.id().index(),
             block.label().unwrap_or_default(),
             block.start_addr(),
             block.end_addr()

@@ -7,7 +7,8 @@ use crate::{
     disassemble::MachineInst,
     llir::{
         BinOp, BranchCondition, BranchTarget, Instruction, InstructionKind,
-        InstructionOrTerminator, LinearProgram, Reg, Rhs, Terminator, TerminatorKind, Value, Var,
+        InstructionOrTerminator, LinearProgram, Place, Reg, Rhs, Terminator, TerminatorKind, Value,
+        Var,
     },
 };
 
@@ -31,9 +32,9 @@ impl LifterCtx {
     }
 
     fn new_temp(&mut self) -> Var {
-        let temp = Var::Temp(self.next_temp);
+        let place = Place::Temp(self.next_temp);
         self.next_temp += 1;
-        temp
+        Var::with_version(place, 0)
     }
 }
 
@@ -62,7 +63,7 @@ fn lift_inst(ctx: &mut LifterCtx, minsn: &MachineInst) -> Vec<InstructionOrTermi
 
 fn lift_binop(minsn: &MachineInst, op: BinOp) -> Vec<InstructionOrTerminator> {
     let rhs = match &operand(minsn, 2).op_type {
-        Arm64OperandType::Reg(reg) => Value::Var(Var::Reg((*reg).into())),
+        Arm64OperandType::Reg(reg) => Value::Var(var_reg((*reg).into())),
         Arm64OperandType::Imm(imm) => Value::Imm(*imm),
         _ => panic!(
             "unsupported mov operand at {:#x}: {} {}",
@@ -73,10 +74,10 @@ fn lift_binop(minsn: &MachineInst, op: BinOp) -> Vec<InstructionOrTerminator> {
     vec![insn(
         minsn.addr,
         InstructionKind::Assign {
-            dst: Var::Reg(opr_reg(minsn, 0)),
+            dst: var_reg(opr_reg(minsn, 0)),
             src: Rhs::BinOp {
                 op,
-                lhs: Value::Var(Var::Reg(opr_reg(minsn, 1))),
+                lhs: Value::Var(var_reg(opr_reg(minsn, 1))),
                 rhs,
             },
         },
@@ -87,7 +88,7 @@ fn lift_adrp(minsn: &MachineInst) -> Vec<InstructionOrTerminator> {
     vec![insn(
         minsn.addr,
         InstructionKind::Assign {
-            dst: Var::Reg(opr_reg(minsn, 0)),
+            dst: var_reg(opr_reg(minsn, 0)),
             src: Rhs::Copy {
                 src: Value::Imm(opr_imm(minsn, 1)),
             },
@@ -123,7 +124,7 @@ fn lift_cbnz(minsn: &MachineInst) -> Vec<InstructionOrTerminator> {
     vec![term(
         minsn.addr,
         TerminatorKind::ConditionalBranch {
-            cond: BranchCondition::NonZero(Value::Var(Var::Reg(opr_reg(minsn, 0)))),
+            cond: BranchCondition::NonZero(Value::Var(var_reg(opr_reg(minsn, 0)))),
             target: BranchTarget::Imm(opr_imm(minsn, 1) as u64),
         },
     )]
@@ -140,7 +141,7 @@ fn lift_ldp(ctx: &mut LifterCtx, minsn: &MachineInst) -> Vec<InstructionOrTermin
     insns.push(insn(
         minsn.addr,
         InstructionKind::Assign {
-            dst: Var::Reg(first),
+            dst: var_reg(first),
             src: Rhs::Load { src: first_addr },
         },
     ));
@@ -148,7 +149,7 @@ fn lift_ldp(ctx: &mut LifterCtx, minsn: &MachineInst) -> Vec<InstructionOrTermin
     insns.push(insn(
         minsn.addr,
         InstructionKind::Assign {
-            dst: Var::Reg(second),
+            dst: var_reg(second),
             src: Rhs::Load { src: second_addr },
         },
     ));
@@ -157,7 +158,7 @@ fn lift_ldp(ctx: &mut LifterCtx, minsn: &MachineInst) -> Vec<InstructionOrTermin
 
 fn lift_mov(minsn: &MachineInst) -> Vec<InstructionOrTerminator> {
     let src = match &operand(minsn, 1).op_type {
-        Arm64OperandType::Reg(reg) => Value::Var(Var::Reg((*reg).into())),
+        Arm64OperandType::Reg(reg) => Value::Var(var_reg((*reg).into())),
         Arm64OperandType::Imm(imm) => Value::Imm(*imm),
         _ => panic!(
             "unsupported mov operand at {:#x}: {} {}",
@@ -168,7 +169,7 @@ fn lift_mov(minsn: &MachineInst) -> Vec<InstructionOrTerminator> {
     vec![insn(
         minsn.addr,
         InstructionKind::Assign {
-            dst: Var::Reg(opr_reg(minsn, 0)),
+            dst: var_reg(opr_reg(minsn, 0)),
             src: Rhs::Copy { src },
         },
     )]
@@ -185,7 +186,7 @@ fn lift_str(ctx: &mut LifterCtx, minsn: &MachineInst) -> Vec<InstructionOrTermin
         minsn.addr,
         InstructionKind::Store {
             dst: addr,
-            src: Value::Var(Var::Reg(opr_reg(minsn, 0))),
+            src: Value::Var(var_reg(opr_reg(minsn, 0))),
         },
     ));
     addr_insns
@@ -197,7 +198,7 @@ fn lift_ldr(ctx: &mut LifterCtx, minsn: &MachineInst) -> Vec<InstructionOrTermin
     addr_insns.push(insn(
         minsn.addr,
         InstructionKind::Assign {
-            dst: Var::Reg(opr_reg(minsn, 0)),
+            dst: var_reg(opr_reg(minsn, 0)),
             src: Rhs::Load { src: addr },
         },
     ));
@@ -216,7 +217,7 @@ fn lift_stp(ctx: &mut LifterCtx, minsn: &MachineInst) -> Vec<InstructionOrTermin
         minsn.addr,
         InstructionKind::Store {
             dst: first_addr,
-            src: Value::Var(Var::Reg(first)),
+            src: Value::Var(var_reg(first)),
         },
     ));
     insns.append(&mut second_addr_insns);
@@ -224,7 +225,7 @@ fn lift_stp(ctx: &mut LifterCtx, minsn: &MachineInst) -> Vec<InstructionOrTermin
         minsn.addr,
         InstructionKind::Store {
             dst: second_addr,
-            src: Value::Var(Var::Reg(second)),
+            src: Value::Var(var_reg(second)),
         },
     ));
     insns
@@ -257,7 +258,7 @@ fn opr_mem(
             dst: temp,
             src: Rhs::BinOp {
                 op: BinOp::Add,
-                lhs: Value::Var(Var::Reg(mem.base().into())),
+                lhs: Value::Var(var_reg(mem.base().into())),
                 rhs: Value::Imm(mem.disp() as i64 + extra_offset),
             },
         },
@@ -336,4 +337,8 @@ impl From<RegId> for Reg {
             r => unimplemented!("unsupported register {:#x}", r),
         }
     }
+}
+
+fn var_reg(reg: Reg) -> Var {
+    Var::from_place(Place::Reg(reg))
 }

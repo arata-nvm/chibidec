@@ -1,7 +1,17 @@
-use std::{collections::HashMap, fmt, hash::Hash};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    hash::Hash,
+};
 
 use anyhow::{Result, anyhow};
-use petgraph::{graph::NodeIndex, prelude::StableGraph};
+use petgraph::{
+    Direction,
+    algo::dominators,
+    graph::NodeIndex,
+    prelude::StableGraph,
+    visit::{GraphBase, IntoNeighbors, IntoNeighborsDirected, IntoNodeIdentifiers, Visitable},
+};
 
 #[derive(Debug, Clone)]
 pub struct IndexedGraph<K, E> {
@@ -106,4 +116,45 @@ pub trait IndexedGraphViewMut: IndexedGraphView {
     fn graph_mut(&mut self) -> &mut StableGraph<Self::Key, Self::Edge> {
         self.inner_mut().graph_mut()
     }
+}
+
+pub type DominanceFrontier<N> = HashMap<N, HashSet<N>>;
+
+pub fn dominance_frontier<G>(graph: G, root: G::NodeId) -> DominanceFrontier<G::NodeId>
+where
+    G: IntoNeighbors + Visitable + IntoNodeIdentifiers + IntoNeighborsDirected,
+    <G as GraphBase>::NodeId: Eq + Hash,
+{
+    let dominators = dominators::simple_fast(graph, root);
+
+    let mut frontier = HashMap::new();
+    for node in graph.node_identifiers() {
+        let preds: Vec<_> = graph
+            .neighbors_directed(node, Direction::Incoming)
+            .collect();
+        if preds.len() < 2 {
+            // 合流ノードでない
+            continue;
+        }
+
+        let idom = dominators
+            .immediate_dominator(node)
+            .expect("join node must have an immediate dominator");
+
+        for pred in preds {
+            let mut runner = pred;
+            while runner != idom {
+                frontier
+                    .entry(runner)
+                    .or_insert(HashSet::new())
+                    .insert(node);
+                let Some(idom) = dominators.immediate_dominator(runner) else {
+                    break;
+                };
+                runner = idom;
+            }
+        }
+    }
+
+    frontier
 }
