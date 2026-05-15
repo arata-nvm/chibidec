@@ -3,9 +3,10 @@
 int main() {
   int a = 0;
   if (a == 0) {
-    puts("a is zero");
+    a = 1;
   } else {
-    puts("a is not zero");
+    a = 2;
   }
+  printf("%d\n", a);
   return 0;
 }
