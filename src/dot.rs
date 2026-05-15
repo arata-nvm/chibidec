@@ -6,11 +6,14 @@ use petgraph::{
 };
 
 use crate::{
-    cfg_recovery::cfg::{Block, BlockId, EdgeLabel},
-    cfg_structuring::region::{RegionId, RegionStore},
+    cfg_structuring::{
+        EdgeLabel,
+        region::{Region, RegionId},
+    },
+    llir::{Block, BlockId},
 };
 
-pub(crate) fn export_cfg_to_dot(
+pub(crate) fn export_llir_graph_to_dot(
     blocks: &Arena<Block>,
     graph: &StableGraph<BlockId, EdgeLabel>,
 ) -> String {
@@ -20,18 +23,7 @@ pub(crate) fn export_cfg_to_dot(
     };
     let get_node_attributes = |_, (_, &block_id)| {
         let block = blocks.get(block_id).expect("block_id must be valid");
-        let mut lines = vec![
-            format!(
-                "{block_id:?}({:?}) [{:#x}-{:#x}]",
-                block.label().unwrap_or_default(),
-                block.start(),
-                block.end()
-            ),
-            "insns:".to_string(),
-        ];
-        lines.extend(block.instructions().iter().map(|insn| format!("  {insn}")));
-        let label = lines.join("\n");
-        format!(r#"label = "{}""#, escape_dot_label(label))
+        format!(r#"label = "{}""#, escape_dot_label(block.to_string()))
     };
     let dot = Dot::with_attr_getters(
         graph,
@@ -43,7 +35,7 @@ pub(crate) fn export_cfg_to_dot(
 }
 
 pub(crate) fn export_region_cfg_to_dot(
-    regions: &RegionStore,
+    regions: &Arena<Region>,
     graph: &StableGraph<RegionId, EdgeLabel>,
 ) -> String {
     let get_edge_attributes = |_, edge: EdgeReference<'_, EdgeLabel>| match edge.weight().color() {

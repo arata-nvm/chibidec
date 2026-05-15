@@ -5,9 +5,10 @@ pub mod region;
 mod scope;
 pub mod seq;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt};
 
 use anyhow::{Context, Result, bail};
+use id_arena::Arena;
 use petgraph::{
     Direction,
     graph::NodeIndex,
@@ -15,20 +16,100 @@ use petgraph::{
 };
 
 use crate::{
-    cfg_recovery::cfg::{Cfg, EdgeLabel},
     cfg_structuring::{
         cycle::{RawLoop, contract_cyclic_region, find_loop, find_smallest_loop},
         if_then::{IfSchema, contract_if, find_if},
-        region::{Region, RegionCfg, RegionId, RegionStore},
+        region::{Region, RegionCfg, RegionId},
         seq::{contract_seq, find_seq},
     },
     graph::{IndexedGraphView, IndexedGraphViewMut},
+    llir::{BlockId, BranchCondition, Function, TerminatorKind},
 };
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Condition {
+    lhs: Option<String>,
+    op: &'static str,
+    rhs: &'static str,
+}
+
+impl Condition {
+    pub fn new(lhs: Option<String>, op: &'static str, rhs: &'static str) -> Self {
+        Self { lhs, op, rhs }
+    }
+
+    pub fn non_zero(value: impl ToString) -> Self {
+        Self::new(Some(value.to_string()), "!=", "0")
+    }
+
+    pub fn gt_zero() -> Self {
+        Self::new(None, ">", "0")
+    }
+
+    pub fn ge_zero() -> Self {
+        Self::new(None, ">=", "0")
+    }
+
+    pub fn negate(&self) -> Self {
+        let op = match self.op {
+            "!=" => "==",
+            "==" => "!=",
+            ">" => "<=",
+            "<=" => ">",
+            ">=" => "<",
+            "<" => ">=",
+            _ => unimplemented!("unsupported condition operator: {}", self.op),
+        };
+        Self {
+            lhs: self.lhs.clone(),
+            op,
+            rhs: self.rhs,
+        }
+    }
+}
+
+impl fmt::Display for Condition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.lhs {
+            Some(lhs) => write!(f, "{} {} {}", lhs, self.op, self.rhs),
+            None => write!(f, "{} {}", self.op, self.rhs),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum EdgeLabel {
+    Unconditional,
+    TrueBranch,
+    FalseBranch,
+}
+
+impl EdgeLabel {
+    pub fn is_branch(&self) -> bool {
+        matches!(self, Self::TrueBranch | Self::FalseBranch)
+    }
+
+    pub fn color(&self) -> Option<&'static str> {
+        match self {
+            Self::TrueBranch => Some("green"),
+            Self::FalseBranch => Some("red"),
+            Self::Unconditional => None,
+        }
+    }
+
+    pub fn apply_condition(&self, cond: &Condition) -> Option<Condition> {
+        match self {
+            Self::TrueBranch => Some(cond.clone()),
+            Self::FalseBranch => Some(cond.negate()),
+            Self::Unconditional => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct StructuredCfg {
     pub cfg: RegionCfg,
-    pub regions: RegionStore,
+    pub regions: Arena<Region>,
     pub virtualized_edges: Vec<VirtualizedEdge>,
 }
 
@@ -36,12 +117,19 @@ pub struct StructuredCfg {
 pub struct VirtualizedEdge {
     pub source: RegionId,
     pub target: RegionId,
-    pub label: EdgeLabel,
+    pub tail: TailKind,
 }
 
-pub fn structure_cfg(cfg: &Cfg) -> Result<StructuredCfg> {
+#[derive(Debug, Clone, PartialEq)]
+pub enum TailKind {
+    Break,
+    Continue,
+    Goto { target: RegionId },
+}
+
+pub fn structure_cfg(func: &Function) -> Result<StructuredCfg> {
     let (mut region_cfg, mut regions) =
-        build_region_cfg(cfg).context("failed to create region cfg")?;
+        build_region_cfg(func).context("failed to create region cfg")?;
 
     let mut count = 0;
     let mut next_loop_index = 0;
@@ -59,12 +147,10 @@ pub fn structure_cfg(cfg: &Cfg) -> Result<StructuredCfg> {
             )
             .expect("failed to write region cfg dot file");
 
-            match find_reduction(&region_cfg, head, next_loop_index)? {
-                Some(Reduction::Cycle {
-                    target: _,
-                    mut raw_loop,
-                }) => {
-                    let (structured_loop, tail_edges) = find_loop(&mut region_cfg, &mut raw_loop);
+            match find_reduction(func, &regions, &region_cfg, head, next_loop_index)? {
+                Some(Reduction::Cycle { mut raw_loop }) => {
+                    let (structured_loop, tail_edges) =
+                        find_loop(func, &regions, &mut region_cfg, &mut raw_loop);
                     next_loop_index += 1;
                     virtualized_edges.extend(tail_edges);
 
@@ -72,6 +158,7 @@ pub fn structure_cfg(cfg: &Cfg) -> Result<StructuredCfg> {
                         create_loop_body_cfg(&region_cfg, &structured_loop, &mut regions)?;
                     let body_region = reduce_loop_body(
                         &mut body_cfg,
+                        func,
                         &mut regions,
                         &mut virtualized_edges,
                         &mut next_loop_index,
@@ -113,15 +200,14 @@ pub fn structure_cfg(cfg: &Cfg) -> Result<StructuredCfg> {
 }
 
 enum Reduction {
-    Cycle {
-        target: NodeIndex,
-        raw_loop: RawLoop,
-    },
+    Cycle { raw_loop: RawLoop },
     Seq(Vec<NodeIndex>),
     If(IfSchema),
 }
 
 fn find_reduction(
+    func: &Function,
+    regions: &Arena<Region>,
     cfg: &RegionCfg,
     head: NodeIndex,
     loop_index: usize,
@@ -132,22 +218,20 @@ fn find_reduction(
             .context("failed to compute region dominance")?;
         if dominance.has_backedge(head) {
             let raw_loop = find_smallest_loop(&dominance, head, loop_index);
-            return Ok(Some(Reduction::Cycle {
-                target: head,
-                raw_loop,
-            }));
+            return Ok(Some(Reduction::Cycle { raw_loop }));
         }
 
         if let Some(seq) = find_seq(cfg, head) {
             return Ok(Some(Reduction::Seq(seq)));
         }
 
-        Ok(find_if(&dominance, head).map(Reduction::If))
+        Ok(find_if(func, regions, &dominance, head).map(Reduction::If))
     }
 }
 
-fn build_region_cfg(cfg: &Cfg) -> Result<(RegionCfg, RegionStore)> {
-    let mut regions = RegionStore::new();
+fn build_region_cfg(func: &Function) -> Result<(RegionCfg, Arena<Region>)> {
+    let mut regions = Arena::new();
+    let cfg = func.cfg();
     let mut region_cfg =
         RegionCfg::with_capacity(cfg.graph().node_count() + 1, cfg.graph().edge_count() + 1);
 
@@ -167,9 +251,8 @@ fn build_region_cfg(cfg: &Cfg) -> Result<(RegionCfg, RegionStore)> {
         let target = node_map
             .get(&cfg_edge.target())
             .expect("missing region node for target block");
-        region_cfg
-            .graph_mut()
-            .add_edge(*source, *target, cfg_edge.weight().clone());
+        let label = cfg_edge.weight().clone();
+        region_cfg.graph_mut().add_edge(*source, *target, label);
     }
 
     region_cfg
@@ -179,9 +262,25 @@ fn build_region_cfg(cfg: &Cfg) -> Result<(RegionCfg, RegionStore)> {
     Ok((region_cfg, regions))
 }
 
+pub(crate) fn branch_condition_for_block(func: &Function, block_id: BlockId) -> Option<Condition> {
+    match func.block(block_id).terminator().kind() {
+        TerminatorKind::ConditionalBranch { cond, .. } => Some(condition_from_branch(cond)),
+        TerminatorKind::Branch { .. } | TerminatorKind::Ret => None,
+    }
+}
+
+fn condition_from_branch(cond: &BranchCondition) -> Condition {
+    match cond {
+        BranchCondition::NonZero(value) => Condition::non_zero(value),
+        BranchCondition::Ge => Condition::ge_zero(),
+        BranchCondition::Gt => Condition::gt_zero(),
+    }
+}
+
 fn reduce_loop_body(
     cfg: &mut RegionCfg,
-    regions: &mut RegionStore,
+    func: &Function,
+    regions: &mut Arena<Region>,
     virtualized_edges: &mut Vec<VirtualizedEdge>,
     next_loop_index: &mut usize,
     loop_index: usize,
@@ -202,13 +301,14 @@ fn reduce_loop_body(
                 }
             };
             if let Some(mut raw_loop) = nested_loop {
-                let (structured_loop, tail_edges) = find_loop(cfg, &mut raw_loop);
+                let (structured_loop, tail_edges) = find_loop(func, regions, cfg, &mut raw_loop);
                 *next_loop_index += 1;
                 virtualized_edges.extend(tail_edges);
 
                 let mut body_cfg = create_loop_body_cfg(cfg, &structured_loop, regions)?;
                 let body_region = reduce_loop_body(
                     &mut body_cfg,
+                    func,
                     regions,
                     virtualized_edges,
                     next_loop_index,
@@ -229,7 +329,7 @@ fn reduce_loop_body(
                 let dominance = cfg
                     .compute_dominance()
                     .context("failed to compute loop body dominance")?;
-                find_if(&dominance, head)
+                find_if(func, regions, &dominance, head)
             };
             if let Some(if_schema) = if_schema {
                 contract_if(cfg, regions, if_schema);
@@ -253,7 +353,7 @@ fn reduce_loop_body(
 fn create_loop_body_cfg(
     main_cfg: &RegionCfg,
     structured_loop: &cycle::StructuredLoop,
-    regions: &mut RegionStore,
+    regions: &mut Arena<Region>,
 ) -> Result<RegionCfg> {
     let mut body_cfg = RegionCfg::with_capacity(
         structured_loop.body.len() + 1,

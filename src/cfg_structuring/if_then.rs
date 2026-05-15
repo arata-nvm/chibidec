@@ -1,14 +1,16 @@
 use std::collections::{HashSet, VecDeque};
 
+use id_arena::Arena;
 use petgraph::{Direction, graph::NodeIndex};
 
 use crate::{
-    cfg_recovery::cfg::{Condition, EdgeLabel},
     cfg_structuring::{
-        region::{Region, RegionCfg, RegionDominanceView, RegionId, RegionStore},
+        Condition, EdgeLabel,
+        region::{Region, RegionCfg, RegionDominanceView, RegionId},
         scope::{is_in_scope, scoped_neighbors},
     },
     graph::{IndexedGraphView, IndexedGraphViewMut},
+    llir::Function,
 };
 
 #[derive(Debug)]
@@ -53,11 +55,18 @@ impl From<IfSchema> for Region {
     }
 }
 
-pub(crate) fn find_if(dominance: &RegionDominanceView<'_>, head: NodeIndex) -> Option<IfSchema> {
-    find_if_with_scope(dominance, head, None)
+pub(crate) fn find_if(
+    func: &Function,
+    regions: &Arena<Region>,
+    dominance: &RegionDominanceView<'_>,
+    head: NodeIndex,
+) -> Option<IfSchema> {
+    find_if_with_scope(func, regions, dominance, head, None)
 }
 
 fn find_if_with_scope(
+    func: &Function,
+    regions: &Arena<Region>,
     dominance: &RegionDominanceView<'_>,
     head: NodeIndex,
     scope: Option<&HashSet<RegionId>>,
@@ -142,13 +151,13 @@ fn find_if_with_scope(
         join: cfg
             .key_for_node(join)
             .expect("missing region node for join"),
-        cond: head_to_then.effective_condition(),
+        cond: cfg.edge_condition(func, regions, head, then_entry),
     })
 }
 
 pub(crate) fn contract_if(
     cfg: &mut RegionCfg,
-    regions: &mut RegionStore,
+    regions: &mut Arena<Region>,
     if_schema: IfSchema,
 ) -> RegionId {
     let head_node = cfg

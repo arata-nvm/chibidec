@@ -5,16 +5,19 @@ use id_arena::{Arena, Id};
 use petgraph::{
     Direction,
     algo::dominators::{self, Dominators},
-    graph::NodeIndex,
+    graph::{EdgeIndex, NodeIndex},
     prelude::StableGraph,
     visit::{EdgeRef, Reversed},
 };
 
 use crate::{
-    cfg_recovery::cfg::{BlockId, Condition, EdgeLabel},
-    cfg_structuring::cycle::{LoopKind, StructuredLoop},
+    cfg_structuring::{
+        Condition, EdgeLabel, branch_condition_for_block,
+        cycle::{LoopKind, StructuredLoop},
+    },
     dot::export_region_cfg_to_dot,
     graph::{IndexedGraph, IndexedGraphView, IndexedGraphViewMut},
+    llir::{BlockId, Function},
 };
 
 pub type RegionId = Id<Region>;
@@ -36,31 +39,6 @@ pub enum Region {
         body: RegionId,
     },
     VirtualExit,
-}
-
-#[derive(Debug, Clone)]
-pub struct RegionStore {
-    regions: Arena<Region>,
-}
-
-impl RegionStore {
-    pub(crate) fn new() -> Self {
-        Self {
-            regions: Arena::new(),
-        }
-    }
-
-    pub(crate) fn alloc(&mut self, region: Region) -> RegionId {
-        self.regions.alloc(region)
-    }
-
-    pub(crate) fn get(&self, region_id: RegionId) -> Option<&Region> {
-        self.regions.get(region_id)
-    }
-
-    pub fn get_mut(&mut self, region_id: RegionId) -> Option<&mut Region> {
-        self.regions.get_mut(region_id)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -94,7 +72,7 @@ impl RegionCfg {
 
     pub(crate) fn add_region(
         &mut self,
-        regions: &mut RegionStore,
+        regions: &mut Arena<Region>,
         region: Region,
     ) -> (RegionId, NodeIndex) {
         let region_id = regions.alloc(region);
@@ -107,7 +85,7 @@ impl RegionCfg {
     }
 
     // 出口から仮想的な出口ノードへのエッジを追加し、単一の出口を持つようにする
-    pub(crate) fn add_vexit(&mut self, regions: &mut RegionStore) -> Result<NodeIndex> {
+    pub(crate) fn add_vexit(&mut self, regions: &mut Arena<Region>) -> Result<NodeIndex> {
         let exit_nodes: Vec<_> = self.graph().externals(Direction::Outgoing).collect();
         if exit_nodes.is_empty() {
             bail!("cfg has no exit nodes");
@@ -199,6 +177,31 @@ impl RegionCfg {
         self.graph().edge_weight(edge)
     }
 
+    pub(crate) fn edge_condition(
+        &self,
+        func: &Function,
+        regions: &Arena<Region>,
+        source: NodeIndex,
+        target: NodeIndex,
+    ) -> Option<Condition> {
+        let edge = self.graph().find_edge(source, target)?;
+        self.edge_condition_by_id(func, regions, edge)
+    }
+
+    pub(crate) fn edge_condition_by_id(
+        &self,
+        func: &Function,
+        regions: &Arena<Region>,
+        edge: EdgeIndex,
+    ) -> Option<Condition> {
+        let (source, _) = self.graph().edge_endpoints(edge)?;
+        let label = self.graph().edge_weight(edge)?;
+        let source_region = self.key_for_node(source)?;
+        let block = terminating_block(regions, source_region)?;
+        let cond = branch_condition_for_block(func, block)?;
+        label.apply_condition(&cond)
+    }
+
     pub(crate) fn remove_edge_label(
         &mut self,
         from: NodeIndex,
@@ -208,8 +211,16 @@ impl RegionCfg {
         self.graph_mut().remove_edge(edge)
     }
 
-    pub fn dot(&self, regions: &RegionStore) -> String {
+    pub fn dot(&self, regions: &Arena<Region>) -> String {
         export_region_cfg_to_dot(regions, self.graph())
+    }
+}
+
+fn terminating_block(regions: &Arena<Region>, region_id: RegionId) -> Option<BlockId> {
+    match regions.get(region_id)? {
+        Region::Leaf(block) => Some(*block),
+        Region::Seq(seq) => terminating_block(regions, *seq.last()?),
+        Region::If { .. } | Region::Loop { .. } | Region::VirtualExit => None,
     }
 }
 

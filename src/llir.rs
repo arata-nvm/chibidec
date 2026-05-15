@@ -6,9 +6,8 @@ use std::{
 use id_arena::{Arena, Id};
 use petgraph::graph::NodeIndex;
 
-use crate::graph::IndexedGraph;
+use crate::{cfg_structuring::EdgeLabel, dot::export_llir_graph_to_dot, graph::IndexedGraph};
 
-pub mod cfg_recovery;
 pub mod icfg;
 pub mod lifter;
 pub mod ssa;
@@ -18,7 +17,7 @@ pub struct Function {
     name: String,
     entry: NodeIndex,
     blocks: Arena<Block>,
-    cfg: IndexedGraph<BlockId, EdgeKind>,
+    cfg: IndexedGraph<BlockId, EdgeLabel>,
 }
 
 impl Function {
@@ -26,7 +25,7 @@ impl Function {
         name: String,
         entry: BlockId,
         blocks: Arena<Block>,
-        cfg: IndexedGraph<BlockId, EdgeKind>,
+        cfg: IndexedGraph<BlockId, EdgeLabel>,
     ) -> Self {
         let entry = cfg
             .node_for_key(entry)
@@ -63,7 +62,7 @@ impl Function {
         self.blocks.iter_mut().map(|(_, block)| block)
     }
 
-    pub fn cfg(&self) -> &IndexedGraph<BlockId, EdgeKind> {
+    pub fn cfg(&self) -> &IndexedGraph<BlockId, EdgeLabel> {
         &self.cfg
     }
 
@@ -77,6 +76,10 @@ impl Function {
         self.cfg
             .node_for_key(id)
             .expect("block id should exist in CFG")
+    }
+
+    pub fn dot(&self) -> String {
+        export_llir_graph_to_dot(&self.blocks, self.cfg.graph())
     }
 }
 
@@ -229,16 +232,15 @@ impl PhiFunc {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum EdgeKind {
-    Unconditional,
-    TrueBranch,
-    FalseBranch,
-}
-
 #[derive(Debug, Clone)]
 pub struct LinearProgram {
     items: Vec<InstructionOrTerminator>,
+}
+
+impl LinearProgram {
+    pub(crate) fn items(&self) -> &[InstructionOrTerminator] {
+        &self.items
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -365,6 +367,10 @@ impl From<Terminator> for InstructionOrTerminator {
 }
 
 impl Terminator {
+    pub(crate) fn new(addr: u64, kind: TerminatorKind) -> Self {
+        Self { addr, kind }
+    }
+
     pub fn addr(&self) -> u64 {
         self.addr
     }

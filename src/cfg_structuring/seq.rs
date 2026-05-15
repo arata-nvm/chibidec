@@ -1,10 +1,11 @@
 use std::collections::HashSet;
 
+use id_arena::Arena;
 use petgraph::{Direction, graph::NodeIndex};
 
 use crate::{
     cfg_structuring::{
-        region::{RegionCfg, RegionId, RegionStore},
+        region::{RegionCfg, RegionId},
         scope::{is_in_scope, scoped_degree, scoped_neighbor_if_one},
     },
     graph::IndexedGraphView,
@@ -50,7 +51,7 @@ fn find_seq_with_scope(
 
 pub(crate) fn contract_seq(
     region_cfg: &mut RegionCfg,
-    regions: &mut RegionStore,
+    regions: &mut Arena<Region>,
     seq: &[NodeIndex],
 ) -> RegionId {
     let seq_head = seq.first().unwrap();

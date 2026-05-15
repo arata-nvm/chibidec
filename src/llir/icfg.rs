@@ -1,24 +1,19 @@
 use std::collections::HashSet;
 
 use id_arena::Arena;
-use petgraph::{
-    dot::{Config, Dot},
-    graph::NodeIndex,
-    prelude::StableGraph,
-    stable_graph::EdgeReference,
-    visit::Dfs,
-};
+use petgraph::{graph::NodeIndex, prelude::StableGraph, visit::Dfs};
 
 use crate::{
-    dot::escape_dot_label,
+    cfg_structuring::EdgeLabel,
+    dot::export_llir_graph_to_dot,
     graph::{IndexedGraph, IndexedGraphView, IndexedGraphViewMut},
-    llir::{Block, BlockId, EdgeKind, Function, Instruction, Terminator},
+    llir::{Block, BlockId, Function, Instruction, Terminator},
 };
 
 #[derive(Debug, Clone)]
 pub struct Icfg {
     blocks: Arena<Block>,
-    inner: IndexedGraph<BlockId, EdgeKind>,
+    inner: IndexedGraph<BlockId, EdgeLabel>,
 }
 
 impl Default for Icfg {
@@ -32,7 +27,7 @@ impl Default for Icfg {
 
 impl IndexedGraphView for Icfg {
     type Key = BlockId;
-    type Edge = EdgeKind;
+    type Edge = EdgeLabel;
 
     fn inner(&self) -> &IndexedGraph<Self::Key, Self::Edge> {
         &self.inner
@@ -93,7 +88,7 @@ impl Icfg {
     }
 
     pub fn dot(&self) -> String {
-        export_llir_cfg_to_dot(&self.blocks, self.graph())
+        export_llir_graph_to_dot(&self.blocks, self.graph())
     }
 }
 
@@ -118,39 +113,4 @@ fn reachable_subgraph<N: Clone, E: Clone>(
         },
         |_, edge_weight| Some(edge_weight.clone()),
     )
-}
-
-fn export_llir_cfg_to_dot(blocks: &Arena<Block>, graph: &StableGraph<BlockId, EdgeKind>) -> String {
-    let get_edge_attributes = |_, edge: EdgeReference<'_, EdgeKind>| {
-        let color = match edge.weight() {
-            EdgeKind::TrueBranch => Some("green"),
-            EdgeKind::FalseBranch => Some("red"),
-            EdgeKind::Unconditional => None,
-        };
-        match color {
-            Some(color) => format!(r#"color = "{color}""#),
-            None => String::new(),
-        }
-    };
-    let get_node_attributes = |_, (_, &block_id)| {
-        let block = blocks.get(block_id).expect("block_id must be valid");
-        let mut lines = vec![format!(
-            "{}({}) [{:#x}-{:#x}]",
-            block.id().index(),
-            block.label().unwrap_or_default(),
-            block.start_addr(),
-            block.end_addr()
-        )];
-        lines.extend(block.instructions().iter().map(|insn| format!("  {insn}")));
-        lines.push(format!("  {}", block.terminator()));
-        let label = lines.join("\n");
-        format!(r#"label = "{}""#, escape_dot_label(label))
-    };
-    let dot = Dot::with_attr_getters(
-        graph,
-        &[Config::EdgeNoLabel, Config::NodeNoLabel],
-        &get_edge_attributes,
-        &get_node_attributes,
-    );
-    format!("{dot:?}")
 }

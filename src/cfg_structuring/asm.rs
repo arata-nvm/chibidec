@@ -1,148 +1,159 @@
-use std::fmt::Write;
+use std::fmt::{self, Write};
+
+use id_arena::Arena;
 
 use crate::{
-    cfg_recovery::cfg::{Cfg, Condition, EdgeLabel, TailKind},
     cfg_structuring::{
-        StructuredCfg, VirtualizedEdge,
+        Condition, StructuredCfg, TailKind, VirtualizedEdge,
         cycle::LoopKind,
-        region::{Region, RegionId, RegionStore},
+        region::{Region, RegionId},
     },
     graph::IndexedGraphView,
+    llir::{BlockId, Function},
 };
 
-pub fn render_structured_assembly(structured_cfg: &StructuredCfg, cfg: &Cfg) -> String {
+pub fn render_structured_llir(structured_cfg: &StructuredCfg, func: &Function) -> String {
     let mut out = String::new();
-    let region_cfg = &structured_cfg.cfg;
-    let Some(entry) = region_cfg.entry() else {
-        return out;
-    };
-    if entry == region_cfg.vexit() {
-        return out;
-    }
-    let Some(root) = region_cfg.key_for_node(entry) else {
-        return out;
-    };
-
-    fmt_region(
-        &structured_cfg.regions,
-        &structured_cfg.virtualized_edges,
-        cfg,
-        root,
-        0,
-        &mut out,
-    );
+    write_structured_llir(&mut out, structured_cfg, func)
+        .expect("writing to String should not fail");
     out
 }
 
-fn fmt_region(
-    regions: &RegionStore,
-    virtualized_edges: &[VirtualizedEdge],
-    cfg: &Cfg,
-    region_id: RegionId,
-    indent: usize,
-    out: &mut String,
-) {
-    let Some(region) = regions.get(region_id) else {
-        return;
+pub fn write_structured_llir(
+    out: &mut impl Write,
+    structured_cfg: &StructuredCfg,
+    func: &Function,
+) -> fmt::Result {
+    let region_cfg = &structured_cfg.cfg;
+    let Some(entry) = region_cfg.entry() else {
+        return Ok(());
+    };
+    if entry == region_cfg.vexit() {
+        return Ok(());
+    }
+    let Some(root) = region_cfg.key_for_node(entry) else {
+        return Ok(());
     };
 
-    match region {
-        Region::Leaf(block_id) => {
-            fmt_block(cfg, *block_id, indent, out);
-            fmt_virtualized_tail(virtualized_edges, region_id, indent, out);
-        }
-        Region::Seq(seq_regions) => {
-            for region in seq_regions {
-                fmt_region(regions, virtualized_edges, cfg, *region, indent, out);
-            }
-        }
-        Region::If {
-            head,
-            then_br,
-            else_br,
-            cond,
-            ..
-        } => {
-            fmt_region(regions, virtualized_edges, cfg, *head, indent, out);
-            push_line(out, indent, format_args!("if ({}) {{", display_cond(cond)));
-            for region in then_br {
-                fmt_region(regions, virtualized_edges, cfg, *region, indent + 1, out);
-            }
-            match else_br {
-                Some(else_br) => {
-                    push_line(out, indent, format_args!("}} else {{"));
-                    for region in else_br {
-                        fmt_region(regions, virtualized_edges, cfg, *region, indent + 1, out);
-                    }
-                    push_line(out, indent, format_args!("}}"));
-                }
-                None => push_line(out, indent, format_args!("}}")),
-            }
-        }
-        Region::Loop { kind, meta, body } => {
-            let cond = display_cond(&meta.cond);
-            match kind {
-                LoopKind::While => {
-                    push_line(out, indent, format_args!("while ({cond}) {{"));
-                    fmt_region(regions, virtualized_edges, cfg, *body, indent + 1, out);
-                    push_line(out, indent, format_args!("}}"));
-                }
-                LoopKind::DoWhile => {
-                    push_line(out, indent, format_args!("do {{"));
-                    fmt_region(regions, virtualized_edges, cfg, *body, indent + 1, out);
-                    push_line(out, indent, format_args!("}} while ({cond});"));
-                }
-                LoopKind::NatLoop => {
-                    push_line(out, indent, format_args!("while ({cond}) {{"));
-                    fmt_region(regions, virtualized_edges, cfg, *body, indent + 1, out);
-                    push_line(out, indent, format_args!("}}"));
-                }
-            }
-        }
-        Region::VirtualExit => {}
-    }
+    Renderer::new(out, structured_cfg, func).region(root)
 }
 
-fn fmt_virtualized_tail(
-    virtualized_edges: &[VirtualizedEdge],
-    source: RegionId,
+struct Renderer<'a, 'w, W: Write> {
+    out: &'w mut W,
+    regions: &'a Arena<Region>,
+    virtualized_edges: &'a [VirtualizedEdge],
+    func: &'a Function,
     indent: usize,
-    out: &mut String,
-) {
-    for edge in virtualized_edges
-        .iter()
-        .filter(|edge| edge.source == source)
-    {
-        let EdgeLabel::Virtualized(tail) = &edge.label else {
-            continue;
+}
+
+impl<'a, 'w, W: Write> Renderer<'a, 'w, W> {
+    fn new(out: &'w mut W, structured_cfg: &'a StructuredCfg, func: &'a Function) -> Self {
+        Self {
+            out,
+            regions: &structured_cfg.regions,
+            virtualized_edges: &structured_cfg.virtualized_edges,
+            func,
+            indent: 0,
+        }
+    }
+
+    fn region(&mut self, region_id: RegionId) -> fmt::Result {
+        let Some(region) = self.regions.get(region_id) else {
+            return Ok(());
         };
-        match tail {
-            TailKind::Continue => push_line(out, indent, format_args!("continue;")),
-            TailKind::Break => push_line(out, indent, format_args!("break;")),
-            TailKind::Goto { target } => {
-                push_line(out, indent, format_args!("goto {target:?};"));
+
+        match region {
+            Region::Leaf(block) => {
+                self.block(*block)?;
+                self.virtualized_tail(region_id)
             }
+            Region::Seq(seq_regions) => {
+                for region in seq_regions {
+                    self.region(*region)?;
+                }
+                Ok(())
+            }
+            Region::If {
+                head,
+                then_br,
+                else_br,
+                cond,
+                ..
+            } => {
+                self.region(*head)?;
+                self.line(format_args!("if ({}) {{", display_cond(cond)))?;
+                self.indented(|this| {
+                    for region in then_br {
+                        this.region(*region)?;
+                    }
+                    Ok(())
+                })?;
+                if let Some(else_br) = else_br {
+                    self.line(format_args!("}} else {{"))?;
+                    self.indented(|this| {
+                        for region in else_br {
+                            this.region(*region)?;
+                        }
+                        Ok(())
+                    })?;
+                }
+                self.line(format_args!("}}"))
+            }
+            Region::Loop { kind, meta, body } => {
+                let cond = display_cond(&meta.cond);
+                match kind {
+                    LoopKind::While | LoopKind::NatLoop => {
+                        self.line(format_args!("while ({cond}) {{"))?;
+                        self.indented(|this| this.region(*body))?;
+                        self.line(format_args!("}}"))
+                    }
+                    LoopKind::DoWhile => {
+                        self.line(format_args!("do {{"))?;
+                        self.indented(|this| this.region(*body))?;
+                        self.line(format_args!("}} while ({cond});"))
+                    }
+                }
+            }
+            Region::VirtualExit => Ok(()),
         }
     }
-}
 
-fn fmt_block(
-    cfg: &Cfg,
-    block_id: crate::cfg_recovery::cfg::BlockId,
-    indent: usize,
-    out: &mut String,
-) {
-    let Some(block) = cfg.block(block_id) else {
-        return;
-    };
+    fn virtualized_tail(&mut self, source: RegionId) -> fmt::Result {
+        for edge in self
+            .virtualized_edges
+            .iter()
+            .filter(|edge| edge.source == source)
+        {
+            match &edge.tail {
+                TailKind::Continue => self.line(format_args!("continue;"))?,
+                TailKind::Break => self.line(format_args!("break;"))?,
+                TailKind::Goto { target } => self.line(format_args!("goto {target:?};"))?,
+            }
+        }
+        Ok(())
+    }
 
-    push_line(
-        out,
-        indent,
-        format_args!("// {block_id:?} [{:#x}-{:#x}]", block.start(), block.end()),
-    );
-    for insn in block.instructions() {
-        push_line(out, indent, format_args!("{insn}"));
+    fn block(&mut self, block_id: BlockId) -> fmt::Result {
+        let block = self.func.block(block_id);
+        for line in block.to_string().lines() {
+            self.line(format_args!("{line}"))?;
+        }
+        Ok(())
+    }
+
+    fn indented(&mut self, f: impl FnOnce(&mut Self) -> fmt::Result) -> fmt::Result {
+        self.indent += 1;
+        let result = f(self);
+        self.indent -= 1;
+        result
+    }
+
+    fn line(&mut self, args: fmt::Arguments<'_>) -> fmt::Result {
+        for _ in 0..self.indent {
+            self.out.write_str("    ")?;
+        }
+        self.out.write_fmt(args)?;
+        self.out.write_char('\n')
     }
 }
 
@@ -150,12 +161,4 @@ fn display_cond(cond: &Option<Condition>) -> String {
     cond.as_ref()
         .map(ToString::to_string)
         .unwrap_or_else(|| "unknown".to_string())
-}
-
-fn push_line(out: &mut String, indent: usize, args: std::fmt::Arguments<'_>) {
-    for _ in 0..indent {
-        out.push_str("    ");
-    }
-    let _ = out.write_fmt(args);
-    out.push('\n');
 }

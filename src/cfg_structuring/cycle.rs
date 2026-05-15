@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use id_arena::Arena;
 use petgraph::{
     Direction,
     graph::{EdgeIndex, NodeIndex},
@@ -7,17 +8,17 @@ use petgraph::{
 };
 
 use crate::{
-    cfg_recovery::cfg::{Condition, EdgeLabel, TailKind},
     cfg_structuring::{
-        VirtualizedEdge,
-        region::{Region, RegionCfg, RegionDominanceView, RegionId, RegionStore},
+        Condition, EdgeLabel, TailKind, VirtualizedEdge,
+        region::{Region, RegionCfg, RegionDominanceView, RegionId},
     },
     graph::{IndexedGraphView, IndexedGraphViewMut},
+    llir::Function,
 };
 
 pub fn contract_cyclic_region(
     cfg: &mut RegionCfg,
-    regions: &mut RegionStore,
+    regions: &mut Arena<Region>,
     structured_loop: &StructuredLoop,
     body: RegionId,
 ) -> RegionId {
@@ -26,7 +27,7 @@ pub fn contract_cyclic_region(
 
 fn contract_loop(
     cfg: &mut RegionCfg,
-    regions: &mut RegionStore,
+    regions: &mut Arena<Region>,
     structured_loop: &StructuredLoop,
     body_region: RegionId,
 ) -> RegionId {
@@ -47,10 +48,10 @@ fn contract_loop(
         .expect("loop entry region should have node");
     cfg.redirect_edges_except(entry_node, loop_node, &body_nodes, Direction::Incoming);
 
-    if let Some((exit_node, edge_label)) = structured_loop.loop_exit.exit_target_and_label() {
-        if cfg.graph().find_edge(loop_node, exit_node).is_none() {
-            cfg.graph_mut().add_edge(loop_node, exit_node, edge_label);
-        }
+    if let Some((exit_node, edge_label)) = structured_loop.loop_exit.exit_target_and_label()
+        && cfg.graph().find_edge(loop_node, exit_node).is_none()
+    {
+        cfg.graph_mut().add_edge(loop_node, exit_node, edge_label);
     }
 
     for node in body_nodes {
@@ -62,6 +63,8 @@ fn contract_loop(
 }
 
 pub fn find_loop(
+    func: &Function,
+    regions: &Arena<Region>,
     cfg: &mut RegionCfg,
     raw_loop: &mut RawLoop,
 ) -> (StructuredLoop, Vec<VirtualizedEdge>) {
@@ -85,8 +88,15 @@ pub fn find_loop(
 
     let virtualized_tail_edges = virtualize_loop_tails(cfg, raw_loop, &loop_exit, &body);
     tail_edges.extend(virtualized_tail_edges);
-    let structured_loop =
-        StructuredLoop::build_from_raw_loop(cfg, raw_loop, loop_exit, single_entry, body);
+    let structured_loop = StructuredLoop::build_from_raw_loop(
+        func,
+        regions,
+        cfg,
+        raw_loop,
+        loop_exit,
+        single_entry,
+        body,
+    );
     (structured_loop, tail_edges)
 }
 
@@ -212,6 +222,8 @@ impl StructuredLoop {
     }
 
     pub fn build_from_raw_loop(
+        func: &Function,
+        regions: &Arena<Region>,
         cfg: &RegionCfg,
         raw_loop: &RawLoop,
         loop_exit: LoopExit,
@@ -227,17 +239,20 @@ impl StructuredLoop {
         let cond = match loop_exit.kind() {
             LoopKind::DoWhile => loop_exit
                 .exit_edge()
-                .and_then(|edge| cfg.graph().edge_weight(edge))
-                .and_then(|label| label.effective_condition())
+                .and_then(|edge| cfg.edge_condition_by_id(func, regions, edge))
                 .map(|cond| cond.negate()),
             LoopKind::While => loop_exit
                 .exit_edge()
-                .and_then(|edge| cfg.graph().edge_weight(edge))
-                .and_then(|label| label.effective_condition())
+                .and_then(|edge| cfg.edge_condition_by_id(func, regions, edge))
                 .map(|cond| cond.negate()),
-            LoopKind::NatLoop => {
-                extract_condition(cfg, raw_loop.head, entry, loop_exit.exit_node())
-            }
+            LoopKind::NatLoop => extract_condition(
+                func,
+                regions,
+                cfg,
+                raw_loop.head,
+                entry,
+                loop_exit.exit_node(),
+            ),
         };
         Self::new(
             raw_loop.loop_index,
@@ -275,15 +290,17 @@ fn extract_exit_edges(cfg: &RegionCfg, nodes: &HashSet<NodeIndex>) -> HashSet<Ed
 }
 
 fn extract_condition(
+    func: &Function,
+    regions: &Arena<Region>,
     cfg: &RegionCfg,
     head: NodeIndex,
     entry: NodeIndex,
     succ: Option<NodeIndex>,
 ) -> Option<Condition> {
-    if let Some(label) = cfg.edge_label(head, entry) {
-        label.effective_condition()
-    } else if let Some(label) = cfg.edge_label(head, succ?) {
-        label.effective_condition()
+    if cfg.edge_label(head, entry).is_some() {
+        cfg.edge_condition(func, regions, head, entry)
+    } else if cfg.edge_label(head, succ?).is_some() {
+        cfg.edge_condition(func, regions, head, succ?)
     } else {
         None
     }
@@ -310,16 +327,16 @@ fn ensure_single_entry(
         let target_region = cfg
             .key_for_node(target)
             .expect("target node should have region id");
-        let new_label = EdgeLabel::Virtualized(TailKind::Goto {
+        let tail = TailKind::Goto {
             target: cfg
                 .key_for_node(target)
                 .expect("target node should have region id"),
-        });
+        };
         if render_tail {
             virtualized_edges.push(VirtualizedEdge {
                 source: source_region,
                 target: target_region,
-                label: new_label,
+                tail,
             });
         }
     }
@@ -488,16 +505,16 @@ fn virtualize_loop_tails(
             let target_region = cfg
                 .key_for_node(edge.target())
                 .expect("node should have reigon");
-            let label = if edge.target() == raw_loop.head {
-                EdgeLabel::Virtualized(TailKind::Continue)
+            let tail = if edge.target() == raw_loop.head {
+                TailKind::Continue
             } else if edge.target() == exit_node {
-                EdgeLabel::Virtualized(TailKind::Break)
+                TailKind::Break
             } else if body.contains(&target_region) {
                 continue;
             } else {
-                EdgeLabel::Virtualized(TailKind::Goto {
+                TailKind::Goto {
                     target: target_region,
-                })
+                }
             };
             let render_tail = matches!(edge.weight(), EdgeLabel::Unconditional);
             changed.push((
@@ -505,12 +522,12 @@ fn virtualize_loop_tails(
                 edge.target(),
                 *region,
                 target_region,
-                label,
+                tail,
                 render_tail,
             ));
         }
     }
-    for (source, target, source_region, target_region, label, render_tail) in changed {
+    for (source, target, source_region, target_region, tail, render_tail) in changed {
         while let Some(edge) = cfg.graph().find_edge(source, target) {
             cfg.graph_mut().remove_edge(edge);
         }
@@ -518,7 +535,7 @@ fn virtualize_loop_tails(
             virtualized_edges.push(VirtualizedEdge {
                 source: source_region,
                 target: target_region,
-                label,
+                tail,
             })
         }
     }

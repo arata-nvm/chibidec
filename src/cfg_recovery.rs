@@ -1,22 +1,19 @@
-pub mod cfg;
-pub mod icfg;
-
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use petgraph::graph::NodeIndex;
 
 use crate::{
     binary::Symbol,
-    cfg_recovery::{
-        cfg::{Condition, EdgeLabel},
-        icfg::Icfg,
-    },
-    disassemble::{Instruction, InstructionSequence},
+    cfg_structuring::EdgeLabel,
     graph::IndexedGraphViewMut,
+    llir::{
+        BranchTarget, Instruction, InstructionOrTerminator, LinearProgram, Terminator,
+        TerminatorKind, icfg::Icfg,
+    },
 };
 
-pub fn recover_cfg(insns: &InstructionSequence, symbols: &[Symbol]) -> Icfg {
-    CfgRecovery::new().recover(insns, symbols)
+pub fn recover_icfg(program: &LinearProgram, symbols: &[Symbol]) -> Icfg {
+    CfgRecovery::new().recover(program, symbols)
 }
 
 #[derive(Debug)]
@@ -33,82 +30,78 @@ impl CfgRecovery {
         }
     }
 
-    fn recover(mut self, insns: &InstructionSequence, symbols: &[Symbol]) -> Icfg {
-        self.construct_blocks(insns);
-        self.construct_edges(insns);
+    fn recover(mut self, program: &LinearProgram, symbols: &[Symbol]) -> Icfg {
+        self.construct_blocks(program.items(), symbols);
+        self.construct_edges();
         self.label_blocks(symbols);
         self.graph
     }
 
-    fn construct_blocks(&mut self, insns: &InstructionSequence) {
-        let starts = find_block_start_addrs(insns);
+    fn construct_blocks(&mut self, items: &[InstructionOrTerminator], symbols: &[Symbol]) {
+        let addr_to_index = build_addr_to_index(items);
+
+        let starts = find_block_start_addrs(items, symbols);
         let mut worklist: VecDeque<_> = starts.iter().copied().collect();
-        let mut seen = HashSet::new();
-
         while let Some(start_addr) = worklist.pop_front() {
-            if !seen.insert(start_addr) {
-                continue;
-            }
+            let start_idx = addr_to_index
+                .get(&start_addr)
+                .expect("block start address must correspond to an instruction index");
 
-            let Some(first_insn) = insns.get(start_addr) else {
-                continue;
-            };
-
-            let mut cur_block_insns = vec![first_insn.clone()];
-            while let Some(cur_insn) = cur_block_insns.last() {
-                if cur_insn.is_terminator() {
-                    break;
-                }
-                let Some(next_insn) = insns.fallthrough_insn(cur_insn) else {
-                    break;
+            let mut idx = *start_idx;
+            let mut insns = Vec::new();
+            while let Some(item) = items.get(idx) {
+                let insn = match item {
+                    InstructionOrTerminator::Instruction(insn) => insn,
+                    InstructionOrTerminator::Terminator(term) => {
+                        self.add_block(insns, term.clone());
+                        break;
+                    }
                 };
-                if starts.contains(&next_insn.addr()) {
+
+                insns.push(insn.clone());
+
+                let next_addr = insn.next_addr();
+                if starts.contains(&next_addr) {
+                    let term = Terminator::new(
+                        item.addr(),
+                        TerminatorKind::Branch {
+                            target: BranchTarget::Imm(next_addr),
+                        },
+                    );
+                    self.add_block(insns, term);
                     break;
                 }
-                cur_block_insns.push(next_insn.clone());
+                idx += 1;
             }
-
-            let last_insn = cur_block_insns
-                .last()
-                .expect("block must have at least one instruction");
-            self.add_block(start_addr, last_insn.addr(), cur_block_insns);
         }
     }
 
-    fn construct_edges(&mut self, insns: &InstructionSequence) {
+    fn construct_edges(&mut self) {
         let mut edges = Vec::new();
         for block in self.graph.blocks() {
-            let term_insn = block.terminator();
-            if term_insn.is_ret() {
-                continue;
-            }
-
-            if let Some(target) = term_insn.conditional_branch_target() {
-                let head_cond = Condition::from_block(block);
-                edges.push((
-                    block.start(),
-                    target,
-                    EdgeLabel::TrueBranch(head_cond.clone()),
-                ));
-                if let Some(fallthrough_insn) = insns.fallthrough_insn(term_insn) {
-                    edges.push((
-                        block.start(),
-                        fallthrough_insn.addr(),
-                        EdgeLabel::FalseBranch(head_cond.clone()),
-                    ));
+            match &block.terminator().kind() {
+                TerminatorKind::Branch {
+                    target: BranchTarget::Imm(target),
+                } => {
+                    edges.push((block.start(), *target, EdgeLabel::Unconditional));
                 }
-            } else if let Some(target) = term_insn.unconditional_branch_target() {
-                edges.push((block.start(), target, EdgeLabel::Unconditional));
-            } else if let Some(fallthrough_insn) = insns.fallthrough_insn(term_insn) {
-                edges.push((
-                    block.start(),
-                    fallthrough_insn.addr(),
-                    EdgeLabel::Unconditional,
-                ));
+                TerminatorKind::ConditionalBranch {
+                    target: BranchTarget::Imm(target),
+                    ..
+                } => {
+                    edges.push((block.start(), *target, EdgeLabel::TrueBranch));
+
+                    let next_addr = block.terminator().next_addr();
+                    if self.addr_to_node.contains_key(&next_addr) {
+                        edges.push((block.start(), next_addr, EdgeLabel::FalseBranch));
+                    }
+                }
+                TerminatorKind::Ret => {}
             }
         }
-        for (start, end, label) in edges {
-            self.add_edge(start, end, label);
+
+        for (from, to, edge) in edges {
+            self.add_edge(from, to, edge);
         }
     }
 
@@ -124,36 +117,55 @@ impl CfgRecovery {
         }
     }
 
-    fn add_block(&mut self, start: u64, end: u64, insns: Vec<Instruction>) {
-        let node = self.graph.add_block(start, end, insns);
-        self.addr_to_node.insert(start, node);
+    fn add_block(&mut self, insns: Vec<Instruction>, term: Terminator) {
+        let start = insns
+            .first()
+            .map(|insn| insn.addr())
+            .unwrap_or_else(|| term.addr());
+        let block = self.graph.add_block(insns, term);
+        self.addr_to_node.insert(start, block);
     }
 
-    fn add_edge(&mut self, start: u64, end: u64, label: EdgeLabel) {
-        let from_node = self.addr_to_node[&start];
-        let to_node = self.addr_to_node[&end];
+    fn add_edge(&mut self, from_addr: u64, to_addr: u64, label: EdgeLabel) {
+        let from_node = self.addr_to_node[&from_addr];
+        let to_node = self.addr_to_node[&to_addr];
         self.graph.graph_mut().add_edge(from_node, to_node, label);
     }
 }
 
-fn find_block_start_addrs(insns: &InstructionSequence) -> HashSet<u64> {
+fn build_addr_to_index(items: &[InstructionOrTerminator]) -> HashMap<u64, usize> {
+    let mut addr_to_index = HashMap::new();
+    for (idx, item) in items.iter().enumerate() {
+        addr_to_index.entry(item.addr()).or_insert(idx);
+    }
+    addr_to_index
+}
+
+fn find_block_start_addrs(insns: &[InstructionOrTerminator], symbols: &[Symbol]) -> HashSet<u64> {
     let mut starts = HashSet::new();
 
-    for (i, insn) in insns.iter().enumerate() {
-        // 最初の命令
-        if i == 0 {
-            starts.insert(insn.addr());
-        }
+    for symbol in symbols {
+        starts.insert(symbol.addr());
+    }
+
+    // 最初の命令
+    if let Some(first_insn) = insns.first() {
+        starts.insert(first_insn.addr());
+    }
+
+    for (idx, insn) in insns.iter().enumerate() {
+        let Some(term) = insn.terminator() else {
+            continue;
+        };
 
         // 分岐命令の分岐先
-        if let Some(target) = insn.branch_target() {
-            starts.insert(target);
+        if let Some(BranchTarget::Imm(target)) = term.branch_target() {
+            starts.insert(*target);
         }
 
         // 条件分岐命令の次
-        if insn.is_conditional_branch()
-            && let Some(next_insn) = insns.fallthrough_insn(insn)
-        {
+        if let Some(next_insn) = insns.get(idx + 1) {
+            assert!(next_insn.addr() != insn.addr());
             starts.insert(next_insn.addr());
         }
     }
