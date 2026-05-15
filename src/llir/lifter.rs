@@ -52,6 +52,8 @@ fn lift_inst(ctx: &mut LifterCtx, minsn: &MachineInst) -> Vec<InstructionOrTermi
         Arm64Insn::ARM64_INS_STP => lift_stp(ctx, minsn),
         Arm64Insn::ARM64_INS_STR | Arm64Insn::ARM64_INS_STUR => lift_str(ctx, minsn),
         Arm64Insn::ARM64_INS_SUB | Arm64Insn::ARM64_INS_SUBS => lift_binop(minsn, BinOp::Sub),
+        Arm64Insn::ARM64_INS_MUL => lift_binop(minsn, BinOp::Mul),
+        Arm64Insn::ARM64_INS_SDIV => lift_binop(minsn, BinOp::SDiv),
         _ => unimplemented!(
             "unsupported instruction at {:#x}: {} {}",
             minsn.addr,
@@ -277,6 +279,7 @@ fn reject_writeback(minsn: &MachineInst) {
 fn format_arm64_cond(cc: Arm64CC) -> BranchCondition {
     match cc {
         Arm64CC::ARM64_CC_GE => BranchCondition::Ge,
+        Arm64CC::ARM64_CC_GT => BranchCondition::Gt,
         _ => unimplemented!("unsupported ARM64 condition code {cc:?}"),
     }
 }

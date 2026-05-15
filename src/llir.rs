@@ -416,20 +416,21 @@ pub enum TerminatorKind {
 pub enum BranchCondition {
     NonZero(Value),
     Ge,
+    Gt,
 }
 
 impl VarVisitor for BranchCondition {
     fn visit_vars(&self, mut f: &mut impl FnMut(VarRole, Var)) {
         match self {
             Self::NonZero(value) => value.visit_vars(&mut f),
-            Self::Ge => {}
+            Self::Ge | Self::Gt => {}
         }
     }
 
     fn rewrite_vars(&mut self, f: &mut impl FnMut(VarRole, Var) -> Var) {
         match self {
             Self::NonZero(value) => value.rewrite_vars(f),
-            Self::Ge => {}
+            Self::Ge | Self::Gt => {}
         }
     }
 }
@@ -474,6 +475,8 @@ impl VarVisitor for Rhs {
 pub enum BinOp {
     Add,
     Sub,
+    Mul,
+    SDiv,
 }
 
 #[derive(Debug, Clone)]
@@ -683,6 +686,7 @@ impl fmt::Display for BranchCondition {
         match self {
             Self::NonZero(value) => write!(f, "{value} != 0"),
             Self::Ge => write!(f, ">= 0"),
+            Self::Gt => write!(f, "> 0"),
         }
     }
 }
@@ -710,6 +714,8 @@ impl fmt::Display for BinOp {
         match self {
             Self::Add => write!(f, "add"),
             Self::Sub => write!(f, "sub"),
+            Self::Mul => write!(f, "sdiv"),
+            Self::SDiv => write!(f, "sdiv"),
         }
     }
 }
