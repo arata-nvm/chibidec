@@ -4,6 +4,7 @@ use petgraph::{
     Direction,
     algo::dominators::{self, Dominators},
     graph::NodeIndex,
+    visit::{DfsPostOrder, Walker},
 };
 
 use crate::{
@@ -11,7 +12,7 @@ use crate::{
     llir::{BlockId, Function, PhiFunc, Place, Value, Var, VarRole, VarVisitor},
 };
 
-pub fn construct_minimal_ssa(func: &Function) -> Function {
+pub fn construct_ssa(func: &Function) -> Function {
     let mut func = func.clone();
 
     let entry_node = func
@@ -19,7 +20,8 @@ pub fn construct_minimal_ssa(func: &Function) -> Function {
         .node_for_key(func.entry())
         .expect("entry node must exist");
     let df = dominance_frontier(func.cfg().graph(), entry_node);
-    let phi_sites = compute_phi_sites(&func, &df);
+    let live_in = compute_live_in(&func);
+    let phi_sites = compute_phi_sites(&func, &df, &live_in);
 
     for (place, sites) in phi_sites {
         for site in sites {
@@ -40,6 +42,7 @@ pub fn construct_minimal_ssa(func: &Function) -> Function {
 fn compute_phi_sites(
     func: &Function,
     df: &DominanceFrontier<NodeIndex>,
+    live_in: &HashMap<NodeIndex, HashSet<Place>>,
 ) -> HashMap<Place, HashSet<NodeIndex>> {
     let mut place_to_phi_sites = HashMap::new();
 
@@ -57,7 +60,10 @@ fn compute_phi_sites(
                 continue;
             };
             for df_node in df_nodes {
-                if !phi_sites.contains(df_node) {
+                let live_here = live_in
+                    .get(df_node)
+                    .is_none_or(|live| live.contains(&place));
+                if !phi_sites.contains(df_node) && live_here {
                     phi_sites.insert(*df_node);
                     worklist.push(*df_node);
                 }
@@ -70,6 +76,81 @@ fn compute_phi_sites(
     }
 
     place_to_phi_sites
+}
+
+fn compute_live_in(func: &Function) -> HashMap<NodeIndex, HashSet<Place>> {
+    let block_uses: HashMap<NodeIndex, HashSet<Place>> = func
+        .blocks()
+        .map(|block| {
+            let node = func
+                .cfg()
+                .node_for_key(block.id())
+                .expect("block must exist");
+            (
+                node,
+                block.uses().into_iter().map(|var| var.place()).collect(),
+            )
+        })
+        .collect();
+
+    let block_defs: HashMap<NodeIndex, HashSet<Place>> = func
+        .blocks()
+        .map(|block| {
+            let node = func
+                .cfg()
+                .node_for_key(block.id())
+                .expect("block must exist");
+            (
+                node,
+                block.defs().into_iter().map(|var| var.place()).collect(),
+            )
+        })
+        .collect();
+
+    let entry_node = func
+        .cfg()
+        .node_for_key(func.entry())
+        .expect("entry node must exist");
+    let post_order: Vec<_> = DfsPostOrder::new(func.cfg().graph(), entry_node)
+        .iter(func.cfg().graph())
+        .collect();
+
+    let mut live_in = HashMap::new();
+    loop {
+        let mut changed = false;
+
+        for &node in &post_order {
+            // live_out[n] = U_{s in succ(n)} live_in[s]
+            let new_live_out: HashSet<_> = func
+                .cfg()
+                .graph()
+                .neighbors_directed(node, Direction::Outgoing)
+                .flat_map(|succ| live_in.get(&succ).cloned().unwrap_or_else(HashSet::new))
+                .collect();
+
+            let uses = block_uses
+                .get(&node)
+                .expect("block uses must exist for node");
+            let defs = block_defs
+                .get(&node)
+                .expect("block defs must exist for node");
+
+            // live_in[n] = use[n] U (live_out[n] - def[n])
+            let mut new_live_in = uses.clone();
+            new_live_in.extend(new_live_out.difference(defs).copied());
+
+            if live_in.get(&node) != Some(&new_live_in) {
+                changed = true;
+            }
+
+            live_in.insert(node, new_live_in);
+        }
+
+        if !changed {
+            break;
+        }
+    }
+    live_in
 }
 
 fn rename_vars(func: &mut Function) {
@@ -110,7 +191,12 @@ impl RenameContext {
         self.pop_versions(pushed_places);
     }
 
-    fn rename_phi_defs(&mut self, id: BlockId, func: &mut Function, pushed_places: &mut Vec<Place>) {
+    fn rename_phi_defs(
+        &mut self,
+        id: BlockId,
+        func: &mut Function,
+        pushed_places: &mut Vec<Place>,
+    ) {
         let block = func.block_mut(id);
         for phi in block.phi_mut() {
             let new_dst = self.define_var(phi.dst().place(), pushed_places);
@@ -118,7 +204,12 @@ impl RenameContext {
         }
     }
 
-    fn rename_block_vars(&mut self, id: BlockId, func: &mut Function, pushed_places: &mut Vec<Place>) {
+    fn rename_block_vars(
+        &mut self,
+        id: BlockId,
+        func: &mut Function,
+        pushed_places: &mut Vec<Place>,
+    ) {
         let block = func.block_mut(id);
         block.rewrite_vars(&mut |r, v| match r {
             VarRole::Use => self.current_var(v.place()),
@@ -169,7 +260,9 @@ impl RenameContext {
                 .stack
                 .get_mut(&place)
                 .expect("version stack must exist for defined place");
-            stack.pop().expect("version stack must contain pushed version");
+            stack
+                .pop()
+                .expect("version stack must contain pushed version");
         }
     }
 
@@ -186,7 +279,10 @@ impl RenameContext {
         let counter = self.counter.entry(place).or_insert(0);
         *counter += 1;
         let version = *counter;
-        self.stack.entry(place).or_insert_with(|| vec![0]).push(version);
+        self.stack
+            .entry(place)
+            .or_insert_with(|| vec![0])
+            .push(version);
         pushed_places.push(place);
         Var::with_version(place, version)
     }

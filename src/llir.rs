@@ -10,7 +10,7 @@ use crate::graph::IndexedGraph;
 pub mod cfg_recovery;
 pub mod icfg;
 pub mod lifter;
-pub mod minimal_ssa;
+pub mod ssa;
 
 #[derive(Debug, Clone)]
 pub struct Function {
@@ -571,9 +571,15 @@ trait VarVisitor {
 
     fn uses(&self) -> HashSet<Var> {
         let mut s = HashSet::new();
-        self.visit_vars(&mut |r, v| {
-            if r == VarRole::Use {
-                s.insert(v);
+        let mut defs = HashSet::new();
+        self.visit_vars(&mut |r, v| match r {
+            VarRole::Use => {
+                if !defs.contains(&v.place()) {
+                    s.insert(v);
+                }
+            }
+            VarRole::Def => {
+                defs.insert(v.place());
             }
         });
         s

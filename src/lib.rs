@@ -8,8 +8,7 @@ use crate::{
     cfg_structuring::{asm::render_structured_assembly, structure_cfg},
     disassemble::{disassemble, disassemble_detailed},
     llir::{
-        cfg_recovery::recover_icfg as recover_llir_icfg, lifter::lift_text,
-        minimal_ssa::construct_minimal_ssa,
+        cfg_recovery::recover_icfg as recover_llir_icfg, lifter::lift_text, ssa::construct_ssa,
     },
 };
 
@@ -46,7 +45,7 @@ pub fn decompile(binary_path: &Path) -> Result<()> {
         .context("failed to extract main LLIR function")?;
     std::fs::write("tmp/main.llir.txt", main_llir.to_string())
         .context("failed to write tmp/main.llir.txt")?;
-    let main_llir_ssa = construct_minimal_ssa(&main_llir);
+    let main_llir_ssa = construct_ssa(&main_llir);
     std::fs::write("tmp/main.llir_ssa.txt", main_llir_ssa.to_string())
         .context("failed to write tmp/main.llir_ssa.txt")?;
 
