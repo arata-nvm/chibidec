@@ -63,9 +63,9 @@ impl Function {
         &self.cfg
     }
 
-    pub fn find_def(&self, var: &Var) -> Vec<BlockId> {
+    pub fn find_def_of_place(&self, place: Place) -> Vec<BlockId> {
         self.blocks()
-            .filter(|block| block.defs().contains(var))
+            .filter(|block| block.defs().iter().any(|var| var.place() == place))
             .map(|block| block.id())
             .collect()
     }

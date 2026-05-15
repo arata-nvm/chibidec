@@ -21,14 +21,14 @@ pub fn construct_minimal_ssa(func: &Function) -> Function {
     let df = dominance_frontier(func.cfg().graph(), entry_node);
     let phi_sites = compute_phi_sites(&func, &df);
 
-    for (var, sites) in phi_sites {
+    for (place, sites) in phi_sites {
         for site in sites {
             let block_id = func
                 .cfg()
                 .key_for_node(site)
                 .expect("site block must exist");
             let block = func.block_mut(block_id);
-            block.add_phi(PhiFunc::new(var));
+            block.add_phi(PhiFunc::new(Var::from_place(place)));
         }
     }
 
@@ -40,14 +40,15 @@ pub fn construct_minimal_ssa(func: &Function) -> Function {
 fn compute_phi_sites(
     func: &Function,
     df: &DominanceFrontier<NodeIndex>,
-) -> HashMap<Var, HashSet<NodeIndex>> {
-    let mut var_to_phi_sites = HashMap::new();
+) -> HashMap<Place, HashSet<NodeIndex>> {
+    let mut place_to_phi_sites = HashMap::new();
 
-    for var in func.vars() {
+    let places: HashSet<_> = func.vars().into_iter().map(|var| var.place()).collect();
+    for place in places {
         let mut phi_sites = HashSet::new();
 
         let mut worklist: Vec<_> = func
-            .find_def(&var)
+            .find_def_of_place(place)
             .into_iter()
             .map(|block| func.cfg().node_for_key(block).expect("block must exist"))
             .collect();
@@ -63,10 +64,12 @@ fn compute_phi_sites(
             }
         }
 
-        var_to_phi_sites.insert(var, phi_sites);
+        if !phi_sites.is_empty() {
+            place_to_phi_sites.insert(place, phi_sites);
+        }
     }
 
-    var_to_phi_sites
+    place_to_phi_sites
 }
 
 fn rename_vars(func: &mut Function) {
@@ -97,19 +100,33 @@ impl RenameContext {
         func: &mut Function,
         dom: &Dominators<NodeIndex>,
     ) {
-        let saved = self.stack.clone();
+        let mut pushed_places = Vec::new();
 
+        self.rename_phi_defs(id, func, &mut pushed_places);
+        self.rename_block_vars(id, func, &mut pushed_places);
+        self.add_phi_args_to_successors(id, func);
+        self.rename_dominated_children(id, func, dom);
+
+        self.pop_versions(pushed_places);
+    }
+
+    fn rename_phi_defs(&mut self, id: BlockId, func: &mut Function, pushed_places: &mut Vec<Place>) {
         let block = func.block_mut(id);
         for phi in block.phi_mut() {
-            let new_dst = self.new_version_of(phi.dst());
+            let new_dst = self.define_var(phi.dst().place(), pushed_places);
             phi.set_dst(new_dst);
         }
+    }
 
+    fn rename_block_vars(&mut self, id: BlockId, func: &mut Function, pushed_places: &mut Vec<Place>) {
+        let block = func.block_mut(id);
         block.rewrite_vars(&mut |r, v| match r {
-            VarRole::Use => self.current_version_of(v),
-            VarRole::Def => self.new_version_of(v),
+            VarRole::Use => self.current_var(v.place()),
+            VarRole::Def => self.define_var(v.place(), pushed_places),
         });
+    }
 
+    fn add_phi_args_to_successors(&self, id: BlockId, func: &mut Function) {
         let node = func.cfg().node_for_key(id).expect("block must exist");
         let succs: Vec<_> = func
             .cfg()
@@ -123,24 +140,40 @@ impl RenameContext {
                 .expect("successor block must exist");
             let succ_block = func.block_mut(succ_block_id);
             for phi in succ_block.phi_mut() {
-                let arg = self.current_version_of(phi.dst());
+                let arg = self.current_var(phi.dst().place());
                 phi.add_arg(id, Value::Var(arg));
             }
         }
+    }
 
-        for succ in dom.immediately_dominated_by(node) {
+    fn rename_dominated_children(
+        &mut self,
+        id: BlockId,
+        func: &mut Function,
+        dom: &Dominators<NodeIndex>,
+    ) {
+        let node = func.cfg().node_for_key(id).expect("block must exist");
+        let dominated: Vec<_> = dom.immediately_dominated_by(node).collect();
+        for succ in dominated {
             let succ_block_id = func
                 .cfg()
                 .key_for_node(succ)
                 .expect("successor block must exist");
             self.rename_vars_in_block(succ_block_id, func, dom);
         }
-
-        let _ = std::mem::replace(&mut self.stack, saved);
     }
 
-    fn current_version_of(&self, var: Var) -> Var {
-        let place = var.place();
+    fn pop_versions(&mut self, pushed_places: Vec<Place>) {
+        for place in pushed_places.into_iter().rev() {
+            let stack = self
+                .stack
+                .get_mut(&place)
+                .expect("version stack must exist for defined place");
+            stack.pop().expect("version stack must contain pushed version");
+        }
+    }
+
+    fn current_var(&self, place: Place) -> Var {
         let version = self
             .stack
             .get(&place)
@@ -149,11 +182,12 @@ impl RenameContext {
         Var::with_version(place, version)
     }
 
-    fn new_version_of(&mut self, var: Var) -> Var {
-        let place = var.place();
-        let version = *self.counter.entry(place).or_insert(0) + 1;
-        self.counter.insert(place, version);
-        self.stack.entry(place).or_insert(vec![0]).push(version);
+    fn define_var(&mut self, place: Place, pushed_places: &mut Vec<Place>) -> Var {
+        let counter = self.counter.entry(place).or_insert(0);
+        *counter += 1;
+        let version = *counter;
+        self.stack.entry(place).or_insert_with(|| vec![0]).push(version);
+        pushed_places.push(place);
         Var::with_version(place, version)
     }
 }
