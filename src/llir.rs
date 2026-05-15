@@ -4,6 +4,7 @@ use std::{
 };
 
 use id_arena::{Arena, Id};
+use petgraph::graph::NodeIndex;
 
 use crate::graph::IndexedGraph;
 
@@ -15,7 +16,7 @@ pub mod ssa;
 #[derive(Debug, Clone)]
 pub struct Function {
     name: String,
-    entry: BlockId,
+    entry: NodeIndex,
     blocks: Arena<Block>,
     cfg: IndexedGraph<BlockId, EdgeKind>,
 }
@@ -27,6 +28,9 @@ impl Function {
         blocks: Arena<Block>,
         cfg: IndexedGraph<BlockId, EdgeKind>,
     ) -> Self {
+        let entry = cfg
+            .node_for_key(entry)
+            .expect("entry block must exist in CFG");
         Self {
             name,
             entry,
@@ -39,7 +43,7 @@ impl Function {
         &self.name
     }
 
-    pub fn entry(&self) -> BlockId {
+    pub fn entry(&self) -> NodeIndex {
         self.entry
     }
 
@@ -63,11 +67,16 @@ impl Function {
         &self.cfg
     }
 
-    pub fn find_def_of_place(&self, place: Place) -> Vec<BlockId> {
-        self.blocks()
-            .filter(|block| block.defs().iter().any(|var| var.place() == place))
-            .map(|block| block.id())
-            .collect()
+    pub fn block_for_node(&self, node: NodeIndex) -> BlockId {
+        self.cfg
+            .key_for_node(node)
+            .expect("block node should exist")
+    }
+
+    pub fn node_for_block(&self, id: BlockId) -> NodeIndex {
+        self.cfg
+            .node_for_key(id)
+            .expect("block id should exist in CFG")
     }
 }
 
@@ -522,6 +531,10 @@ impl Var {
         self.place
     }
 
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+
     pub fn set_version(&mut self, version: u32) {
         self.version = version;
     }
@@ -560,14 +573,6 @@ pub enum VarRole {
 trait VarVisitor {
     fn visit_vars(&self, f: &mut impl FnMut(VarRole, Var));
     fn rewrite_vars(&mut self, f: &mut impl FnMut(VarRole, Var) -> Var);
-
-    fn vars(&self) -> HashSet<Var> {
-        let mut s = HashSet::new();
-        self.visit_vars(&mut |_, v| {
-            s.insert(v);
-        });
-        s
-    }
 
     fn uses(&self) -> HashSet<Var> {
         let mut s = HashSet::new();

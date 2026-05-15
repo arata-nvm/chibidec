@@ -9,28 +9,24 @@ use petgraph::{
 
 use crate::{
     graph::{DominanceFrontier, dominance_frontier},
-    llir::{BlockId, Function, PhiFunc, Place, Value, Var, VarRole, VarVisitor},
+    llir::{Function, PhiFunc, Place, Value, Var, VarRole, VarVisitor},
 };
 
 pub fn construct_ssa(func: &Function) -> Function {
+    func.visit_vars(&mut |_, var| {
+        assert_eq!(var.version(), 0);
+    });
+
     let mut func = func.clone();
 
-    let entry_node = func
-        .cfg()
-        .node_for_key(func.entry())
-        .expect("entry node must exist");
-    let df = dominance_frontier(func.cfg().graph(), entry_node);
+    let df = dominance_frontier(func.cfg().graph(), func.entry());
     let live_in = compute_live_in(&func);
     let phi_sites = compute_phi_sites(&func, &df, &live_in);
 
-    for (place, sites) in phi_sites {
+    for (var, sites) in phi_sites {
         for site in sites {
-            let block_id = func
-                .cfg()
-                .key_for_node(site)
-                .expect("site block must exist");
-            let block = func.block_mut(block_id);
-            block.add_phi(PhiFunc::new(Var::from_place(place)));
+            let block = func.block_mut(func.block_for_node(site));
+            block.add_phi(PhiFunc::new(var));
         }
     }
 
@@ -42,27 +38,26 @@ pub fn construct_ssa(func: &Function) -> Function {
 fn compute_phi_sites(
     func: &Function,
     df: &DominanceFrontier<NodeIndex>,
-    live_in: &HashMap<NodeIndex, HashSet<Place>>,
-) -> HashMap<Place, HashSet<NodeIndex>> {
-    let mut place_to_phi_sites = HashMap::new();
+    live_in: &HashMap<NodeIndex, HashSet<Var>>,
+) -> HashMap<Var, HashSet<NodeIndex>> {
+    let mut var_to_phi_sites = HashMap::new();
 
-    let places: HashSet<_> = func.vars().into_iter().map(|var| var.place()).collect();
-    for place in places {
+    let vars: HashSet<_> = func.blocks().flat_map(|block| block.defs()).collect();
+    for var in vars {
         let mut phi_sites = HashSet::new();
 
-        let mut worklist: Vec<_> = func
-            .find_def_of_place(place)
-            .into_iter()
-            .map(|block| func.cfg().node_for_key(block).expect("block must exist"))
+        let def_nodes: Vec<_> = func
+            .blocks()
+            .filter(|block| block.defs().contains(&var))
+            .map(|block| func.node_for_block(block.id()))
             .collect();
+        let mut worklist = def_nodes;
         while let Some(node) = worklist.pop() {
             let Some(df_nodes) = df.get(&node) else {
                 continue;
             };
             for df_node in df_nodes {
-                let live_here = live_in
-                    .get(df_node)
-                    .is_none_or(|live| live.contains(&place));
+                let live_here = live_in.get(df_node).is_some_and(|live| live.contains(&var));
                 if !phi_sites.contains(df_node) && live_here {
                     phi_sites.insert(*df_node);
                     worklist.push(*df_node);
@@ -71,47 +66,31 @@ fn compute_phi_sites(
         }
 
         if !phi_sites.is_empty() {
-            place_to_phi_sites.insert(place, phi_sites);
+            var_to_phi_sites.insert(var, phi_sites);
         }
     }
 
-    place_to_phi_sites
+    var_to_phi_sites
 }
 
-fn compute_live_in(func: &Function) -> HashMap<NodeIndex, HashSet<Place>> {
-    let block_uses: HashMap<NodeIndex, HashSet<Place>> = func
+fn compute_live_in(func: &Function) -> HashMap<NodeIndex, HashSet<Var>> {
+    let block_uses: HashMap<NodeIndex, HashSet<Var>> = func
         .blocks()
         .map(|block| {
-            let node = func
-                .cfg()
-                .node_for_key(block.id())
-                .expect("block must exist");
-            (
-                node,
-                block.uses().into_iter().map(|var| var.place()).collect(),
-            )
+            let node = func.node_for_block(block.id());
+            (node, block.uses())
         })
         .collect();
 
-    let block_defs: HashMap<NodeIndex, HashSet<Place>> = func
+    let block_defs: HashMap<NodeIndex, HashSet<Var>> = func
         .blocks()
         .map(|block| {
-            let node = func
-                .cfg()
-                .node_for_key(block.id())
-                .expect("block must exist");
-            (
-                node,
-                block.defs().into_iter().map(|var| var.place()).collect(),
-            )
+            let node = func.node_for_block(block.id());
+            (node, block.defs())
         })
         .collect();
 
-    let entry_node = func
-        .cfg()
-        .node_for_key(func.entry())
-        .expect("entry node must exist");
-    let post_order: Vec<_> = DfsPostOrder::new(func.cfg().graph(), entry_node)
+    let post_order: Vec<_> = DfsPostOrder::new(func.cfg().graph(), func.entry())
         .iter(func.cfg().graph())
         .collect();
 
@@ -154,11 +133,7 @@ fn compute_live_in(func: &Function) -> HashMap<NodeIndex, HashSet<Place>> {
 }
 
 fn rename_vars(func: &mut Function) {
-    let entry_node = func
-        .cfg()
-        .node_for_key(func.entry())
-        .expect("entry node must exist");
-    let dom = dominators::simple_fast(func.cfg().graph(), entry_node);
+    let dom = dominators::simple_fast(func.cfg().graph(), func.entry());
     RenameContext::new().rename_vars_in_block(func.entry(), func, &dom);
 }
 
@@ -177,27 +152,27 @@ impl RenameContext {
 
     fn rename_vars_in_block(
         &mut self,
-        id: BlockId,
+        node: NodeIndex,
         func: &mut Function,
         dom: &Dominators<NodeIndex>,
     ) {
         let mut pushed_places = Vec::new();
 
-        self.rename_phi_defs(id, func, &mut pushed_places);
-        self.rename_block_vars(id, func, &mut pushed_places);
-        self.add_phi_args_to_successors(id, func);
-        self.rename_dominated_children(id, func, dom);
+        self.rename_phi_defs(node, func, &mut pushed_places);
+        self.rename_block_vars(node, func, &mut pushed_places);
+        self.add_phi_args_to_successors(node, func);
+        self.rename_dominated_children(node, func, dom);
 
         self.pop_versions(pushed_places);
     }
 
     fn rename_phi_defs(
         &mut self,
-        id: BlockId,
+        node: NodeIndex,
         func: &mut Function,
         pushed_places: &mut Vec<Place>,
     ) {
-        let block = func.block_mut(id);
+        let block = func.block_mut(func.block_for_node(node));
         for phi in block.phi_mut() {
             let new_dst = self.define_var(phi.dst().place(), pushed_places);
             phi.set_dst(new_dst);
@@ -206,30 +181,26 @@ impl RenameContext {
 
     fn rename_block_vars(
         &mut self,
-        id: BlockId,
+        node: NodeIndex,
         func: &mut Function,
         pushed_places: &mut Vec<Place>,
     ) {
-        let block = func.block_mut(id);
+        let block = func.block_mut(func.block_for_node(node));
         block.rewrite_vars(&mut |r, v| match r {
             VarRole::Use => self.current_var(v.place()),
             VarRole::Def => self.define_var(v.place(), pushed_places),
         });
     }
 
-    fn add_phi_args_to_successors(&self, id: BlockId, func: &mut Function) {
-        let node = func.cfg().node_for_key(id).expect("block must exist");
+    fn add_phi_args_to_successors(&self, node: NodeIndex, func: &mut Function) {
+        let id = func.block_for_node(node);
         let succs: Vec<_> = func
             .cfg()
             .graph()
             .neighbors_directed(node, Direction::Outgoing)
             .collect();
         for succ in succs {
-            let succ_block_id = func
-                .cfg()
-                .key_for_node(succ)
-                .expect("successor block must exist");
-            let succ_block = func.block_mut(succ_block_id);
+            let succ_block = func.block_mut(func.block_for_node(succ));
             for phi in succ_block.phi_mut() {
                 let arg = self.current_var(phi.dst().place());
                 phi.add_arg(id, Value::Var(arg));
@@ -239,18 +210,13 @@ impl RenameContext {
 
     fn rename_dominated_children(
         &mut self,
-        id: BlockId,
+        node: NodeIndex,
         func: &mut Function,
         dom: &Dominators<NodeIndex>,
     ) {
-        let node = func.cfg().node_for_key(id).expect("block must exist");
         let dominated: Vec<_> = dom.immediately_dominated_by(node).collect();
         for succ in dominated {
-            let succ_block_id = func
-                .cfg()
-                .key_for_node(succ)
-                .expect("successor block must exist");
-            self.rename_vars_in_block(succ_block_id, func, dom);
+            self.rename_vars_in_block(succ, func, dom);
         }
     }
 
